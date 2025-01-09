@@ -1,6 +1,6 @@
 import taichi as ti
 
-ti.init(debug=True)
+ti.init(arch=ti.vulkan)
 
 max_num_particles = 256
 
@@ -52,7 +52,7 @@ def substep():
 
 
 @ti.kernel
-def new_particle(pos_x: ti.f32, pos_y: ti.f32): # Taichi doesn't support using Matrices as kernel arguments yet
+def new_particle(pos_x: ti.f32, pos_y: ti.f32): # type: ignore
     new_particle_id = num_particles[None]
     x[new_particle_id] = [pos_x, pos_y]
     v[new_particle_id] = [0, 0]

@@ -1,7 +1,7 @@
 import taichi as ti
 import taichi.math as tm
 
-ti.init(arch=ti.gpu)
+ti.init(arch=ti.vulkan)
 
 n = 320
 pixels = ti.field(dtype=float, shape=(n * 2, n))
