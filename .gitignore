@@ -401,3 +401,8 @@ FodyWeavers.xsd
 
 # Vulkan compiled shader
 *.spv
+
+# output folder
+*/output
+
+*/imgui.ini
