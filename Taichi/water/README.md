@@ -1,6 +1,7 @@
 # Demo 01 · 庭院浅池
 
 完整系列方案见 [WATER_DEMOS.md](../WATER_DEMOS.md)。
+下一个 demo：[02 雨落池塘](demo_02.md)。
 
 ![庭院浅池预览](preview.png)
 
