@@ -1,0 +1,14 @@
+[project]
+name = "cgplayground-taichi"
+version = "0.1.0"
+description = "Taichi rendering and computation demos"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy>=1.26.4,<2",
+    "pillow>=10,<13",
+    "taichi>=1.7.4,<1.8",
+    "torch>=2.2,<3",
+]
+
+[tool.uv]
+package = false
