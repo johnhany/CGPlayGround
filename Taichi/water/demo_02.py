@@ -40,7 +40,7 @@ WAVE_SPEED_MIN, WAVE_SPEED_MAX = 0.3, 1.8
 DAMPING_MIN, DAMPING_MAX = 0.990, 0.9999
 MAX_DROPS = 400
 RAIN_TABLE = 1024
-SPLASH_RADIUS = 0.06
+SPLASH_RADIUS = 0.075
 
 
 @ti.data_oriented
@@ -59,9 +59,57 @@ class WaveSimulation:
         self.h_prev = ti.field(ti.f32, shape=(SIM_NX, SIM_NZ))
         self.h_next = ti.field(ti.f32, shape=(SIM_NX, SIM_NZ))
         self.steps = 0
+        self.revision = ti.field(ti.i32, shape=())
+        self.bounds = ti.Vector.field(2, ti.f32, shape=())
+        self.slopes = ti.Vector.field(2, ti.f32, shape=(SIM_NX, SIM_NZ))
+        self._prepared_revision = None
+
+    def mark_dirty(self):
+        """Call after external field writes, e.g. h.from_numpy()."""
+        self.revision[None] += 1
+
+    @ti.kernel
+    def prepare(self):
+        self.bounds[None] = ti.Vector([1e6, -1e6])
+        for i, j in self.h:
+            ti.atomic_min(self.bounds[None][0], self.h[i, j])
+            ti.atomic_max(self.bounds[None][1], self.h[i, j])
+            self.slopes[i, j] = ti.Vector([
+                (self.h[ti.min(i + 1, SIM_NX - 1), j] - self.h[ti.max(i - 1, 0), j]) / (2 * CELL_X),
+                (self.h[i, ti.min(j + 1, SIM_NZ - 1)] - self.h[i, ti.max(j - 1, 0)]) / (2 * CELL_Z)])
+
+    def prepare_surface(self):
+        revision = int(self.revision[None])
+        if revision != self._prepared_revision:
+            self.prepare()
+            self._prepared_revision = revision
+        return revision
+
+    @ti.func
+    def slope(self, x, z):
+        uv = ti.Vector([(x + POOL_HALF_X) / CELL_X - 0.5,
+                        (z + POOL_HALF_Z) / CELL_Z - 0.5])
+        uv = ti.max(ti.Vector([0.0, 0.0]), ti.min(uv, ti.Vector([SIM_NX - 1.001, SIM_NZ - 1.001])))
+        ij = ti.cast(uv, ti.i32)
+        f = uv - ij
+        return ((self.slopes[ij.x, ij.y] * (1 - f.x) + self.slopes[ij.x + 1, ij.y] * f.x) * (1 - f.y)
+                + (self.slopes[ij.x, ij.y + 1] * (1 - f.x) + self.slopes[ij.x + 1, ij.y + 1] * f.x) * f.y)
+
+    @ti.func
+    def filtered_slope(self, x, z, footprint):
+        # Continuous node gradients, then a pixel-sized box filter. The root
+        # finder still uses the exact bilinear geometric derivative.
+        # Two-point Gauss quadrature of a box footprint. Sampling its corners
+        # (±footprint/2) accidentally cancels visible two-pixel wavelengths.
+        radius = ti.min(0.3, footprint * 0.28867513459)
+        total = ti.Vector([0.0, 0.0])
+        for a, b in ti.static(ti.ndrange(2, 2)):
+            total += self.slope(x + (2 * a - 1) * radius, z + (2 * b - 1) * radius)
+        return total * 0.25
 
     @ti.kernel
     def clear(self):
+        self.revision[None] += 1
         for i, j in self.h:
             self.h[i, j] = 0.0
             self.h_prev[i, j] = 0.0
@@ -77,28 +125,55 @@ class WaveSimulation:
             down = self.h[i, ti.max(0, j - 1)]
             up = self.h[i, ti.min(SIM_NZ - 1, j + 1)]
             laplacian = left + right + down + up - 4.0 * center
-            self.h_next[i, j] = (2.0 * center - self.h_prev[i, j] + courant2 * laplacian) * damping
+            self.h_next[i, j] = center + damping * (center - self.h_prev[i, j]) + courant2 * laplacian
 
-    @ti.kernel
-    def inject(self, cx: ti.f32, cz: ti.f32, radius: ti.f32, strength: ti.f32):
+    @ti.func
+    def disturbance(self, cx, cz, radius, strength, velocity):
+        # Deposit a discrete negative Laplacian of a smooth Gaussian. Every
+        # contribution sums to zero, including at reflective boundaries.
+        # Three radii of support leave <0.013% Gaussian amplitude at the edge.
         gx = (cx + POOL_HALF_X) / CELL_X - 0.5
         gz = (cz + POOL_HALF_Z) / CELL_Z - 0.5
-        reach = ti.cast(radius / CELL_X + 1.5, ti.i32)
-        ci, cj = ti.cast(gx, ti.i32), ti.cast(gz, ti.i32)
+        reach = ti.cast(ti.ceil(3 * radius / CELL_X), ti.i32)
+        ci, cj = ti.cast(ti.floor(gx), ti.i32), ti.cast(ti.floor(gz), ti.i32)
         for a, b in ti.ndrange((-reach, reach + 1), (-reach, reach + 1)):
             i, j = ci + a, cj + b
             if 0 <= i < SIM_NX and 0 <= j < SIM_NZ:
-                dx = (ti.cast(i, ti.f32) - gx) * CELL_X
-                dz = (ti.cast(j, ti.f32) - gz) * CELL_Z
-                falloff = ti.exp(-(dx * dx + dz * dz) / (radius * radius))
-                self.h[i, j] += strength * falloff
+                dx, dz = (i - gx) * CELL_X, (j - gz) * CELL_Z
+                r2 = (dx * dx + dz * dz) / (radius * radius)
+                value = 0.0
+                if r2 < 9.0:
+                    # Value and radial derivative vanish at the support edge.
+                    value = strength * (ti.exp(-r2) - ti.exp(-9.0) * (10.0 - r2)) * radius * radius / (4 * CELL_X * CELL_X)
+                for tap in ti.static(range(5)):
+                    ii, jj, weight = i, j, 4.0
+                    if ti.static(tap == 1):
+                        ii, weight = ti.max(0, i - 1), -1.0
+                    elif ti.static(tap == 2):
+                        ii, weight = ti.min(SIM_NX - 1, i + 1), -1.0
+                    elif ti.static(tap == 3):
+                        jj, weight = ti.max(0, j - 1), -1.0
+                    elif ti.static(tap == 4):
+                        jj, weight = ti.min(SIM_NZ - 1, j + 1), -1.0
+                    delta = value * weight
+                    if velocity:
+                        ti.atomic_add(self.h_prev[ii, jj], -delta * SIM_DT)
+                    else:
+                        ti.atomic_add(self.h[ii, jj], delta)
+                        ti.atomic_add(self.h_prev[ii, jj], delta)
+
+    @ti.kernel
+    def inject(self, cx: ti.f32, cz: ti.f32, radius: ti.f32, strength: ti.f32):
+        """Zero-volume displacement (metres), with zero initial velocity."""
+        self.disturbance(cx, cz, ti.max(CELL_X, radius), strength, False)
+        self.revision[None] += 1
 
     @ti.func
     def sample(self, x, z):
         """Bilinear height with the cell-exact bilinear gradient."""
-        u = ti.max(0.0, ti.min(SIM_NX - 1.001, (x + POOL_HALF_X) / CELL_X - 0.5))
-        v = ti.max(0.0, ti.min(SIM_NZ - 1.001, (z + POOL_HALF_Z) / CELL_Z - 0.5))
-        i0, j0 = ti.cast(u, ti.i32), ti.cast(v, ti.i32)
+        u = ti.max(0.0, ti.min(SIM_NX - 1.0, (x + POOL_HALF_X) / CELL_X - 0.5))
+        v = ti.max(0.0, ti.min(SIM_NZ - 1.0, (z + POOL_HALF_Z) / CELL_Z - 0.5))
+        i0, j0 = ti.min(SIM_NX - 2, ti.cast(u, ti.i32)), ti.min(SIM_NZ - 2, ti.cast(v, ti.i32))
         fu, fv = u - i0, v - j0
         h00 = self.h[i0, j0]
         h10 = self.h[i0 + 1, j0]
@@ -109,12 +184,18 @@ class WaveSimulation:
         dhdz = ((h01 - h00) * (1.0 - fu) + (h11 - h10) * fu) / CELL_Z
         return ti.Vector([height, dhdx, dhdz])
 
+    @ti.kernel
+    def commit_step(self):
+        for i, j in self.h:
+            self.h_prev[i, j] = self.h[i, j]
+            self.h[i, j] = self.h_next[i, j]
+        self.revision[None] += 1
+
     def advance(self, wave_speed, damping, substeps):
         courant2 = (wave_speed * SIM_DT / CELL_X) ** 2
         for _ in range(substeps):
             self.step(courant2, damping)
-            self.h_prev.copy_from(self.h)
-            self.h.copy_from(self.h_next)
+            self.commit_step()
         self.steps += substeps
 
 
@@ -122,8 +203,8 @@ class WaveSimulation:
 class RainSystem:
     """Falling drops with fixed-seed spawn tables; impacts feed the wave field.
 
-    The spawn region sits above the pool interior, so streaks never overlap
-    scene occluders and splashes always land inside the water.
+    Drops spawn above the pool and horizontal drift is contained at the walls.
+    Streaks are depth-tested against the courtyard and water surface.
     """
 
     def __init__(self, sim, seed=17):
@@ -145,6 +226,7 @@ class RainSystem:
         self.vel = ti.Vector.field(3, ti.f32, shape=MAX_DROPS)
         self.slot = ti.field(ti.i32, shape=MAX_DROPS)
         self.count = ti.field(ti.i32, shape=())
+        self.reset()
 
     @ti.kernel
     def reset(self):
@@ -163,19 +245,15 @@ class RainSystem:
                 v = self.vel[i]
                 v.y -= gravity * dt
                 p += v * dt
+                p.x = ti.max(-POOL_HALF_X + CELL_X, ti.min(POOL_HALF_X - CELL_X, p.x))
+                p.z = ti.max(-POOL_HALF_Z + CELL_Z, ti.min(POOL_HALF_Z - CELL_Z, p.z))
                 if p.y <= 0.0:
                     speed = v.norm()
-                    strength = impact * (0.35 + 0.18 * speed) * 0.014
-                    gx = (p.x + POOL_HALF_X) / CELL_X - 0.5
-                    gz = (p.z + POOL_HALF_Z) / CELL_Z - 0.5
-                    ci, cj = ti.cast(gx, ti.i32), ti.cast(gz, ti.i32)
-                    for a, b in ti.ndrange((-2, 3), (-2, 3)):
-                        ii, jj = ci + a, cj + b
-                        if 0 <= ii < SIM_NX and 0 <= jj < SIM_NZ:
-                            dx = (ti.cast(ii, ti.f32) - gx) * CELL_X
-                            dz = (ti.cast(jj, ti.f32) - gz) * CELL_Z
-                            splash = strength * ti.exp(-(dx * dx + dz * dz) / (2.0 * SPLASH_RADIUS * SPLASH_RADIUS))
-                            ti.atomic_add(self.sim.h[ii, jj], splash)
+                    # A pressure/velocity impulse, in m/s. It does not add
+                    # water volume or an artificial height-dependent force.
+                    strength = impact * (0.35 + 0.18 * speed) * 0.75
+                    self.sim.disturbance(p.x, p.z, SPLASH_RADIUS, strength, True)
+                    ti.atomic_add(self.sim.revision[None], 1)
                     k = (self.slot[i] + MAX_DROPS) % RAIN_TABLE
                     self.slot[i] = k
                     p = ti.Vector([self.spawn_x[k], self.spawn_y[k], self.spawn_z[k]])
@@ -200,8 +278,21 @@ class RainPondRenderer(CourtyardScene):
         self.sim = WaveSimulation()
         self.rain = RainSystem(self.sim)
         self.rain_controls = ti.Vector.field(2, ti.f32, shape=())
-        self.rain_controls[None] = [0.6, 0.55]
+        self.rain_controls[None] = [0.75, 0.8]
+        self.water_controls[None] = [0.065, 0.3, 1.0, 4.0]
+        self.bed_detail = ti.field(ti.f32, shape=())
+        self.bed_detail[None] = 0.20
         self._caustic_key = None
+
+    @ti.func
+    def floor_material(self, p, clock, amplitude):
+        # Quiet the high-contrast pebble pattern so moving caustics and
+        # refracted ripples remain the main visual cue in this demo.
+        base, relief = CourtyardScene.floor_material(self, p, clock, amplitude)
+        detail = self.bed_detail[None]
+        base = ti.Vector([0.20, 0.26, 0.25]) * (1 - detail) + base * detail
+        normal = (ti.Vector([0.0, 1.0, 0.0]) * (1 - detail) + relief * detail).normalized()
+        return base, normal
 
     @ti.func
     def wave(self, x, z):
@@ -222,14 +313,15 @@ class RainPondRenderer(CourtyardScene):
         return gradient * edge * self.water_controls[None].y
 
     @ti.kernel
-    def trace_caustics(self, clock: ti.f32, lighting: ti.f32, shadows: ti.i32):
+    def _trace_caustics(self, clock: ti.f32, lighting: ti.f32, shadows: ti.i32):
         for x, y in self.caustic_raw:
             self.caustic_raw[x, y] = 0.0
         for x, y in ti.ndrange(256, 192):
             px, pz = (x + 0.5) / 256 * 2 * POOL_HALF_X - POOL_HALF_X, (y + 0.5) / 192 * 2 * POOL_HALF_Z - POOL_HALF_Z
             wave = self.wave(px, pz)
             fine = self.detail_gradient(px, pz, clock, 2 * POOL_HALF_X / 128)
-            normal = ti.Vector([-wave.y - fine.x, 1.0, -wave.z - fine.y]).normalized()
+            slope = self.sim.filtered_slope(px, pz, 2 * POOL_HALF_X / 128) + fine
+            normal = ti.Vector([-slope.x, 1.0, -slope.y]).normalized()
             p = ti.Vector([px, wave.x, pz])
             sun = self.sun_direction(lighting)
             cosine = ti.max(0.0, sun.dot(normal))
@@ -253,28 +345,91 @@ class RainPondRenderer(CourtyardScene):
                         weight = (fx if a else 1.0 - fx) * (fy if b else 1.0 - fy)
                         ti.atomic_add(self.caustic_raw[ix + a, iy + b], energy * weight)
 
+    def trace_caustics(self, clock, lighting, shadows):
+        self.sim.prepare_surface()
+        self._trace_caustics(clock, lighting, shadows)
+
     @ti.func
     def water_hit(self, origin, direction):
+        """Nearest entering root: grid DDA and exact bilinear-cell quadratic.
+
+        The surface AABB restricts traversal to the measured wave height
+        range. No Newton starting guess or fixed marching step can skip a crest.
+        """
         t = 1e6
         normal = ti.Vector([0.0, 1.0, 0.0])
-        if direction.y < -0.0001:
-            candidate = -origin.y / direction.y
-            for _ in ti.static(range(8)):
-                p = origin + direction * candidate
-                wave = self.wave(p.x, p.z)
-                derivative = direction.y - wave.y * direction.x - wave.z * direction.z
-                if ti.abs(derivative) > 0.005:
-                    step = (p.y - wave.x) / derivative
-                    candidate -= ti.max(-0.25, ti.min(0.25, step))
-            p = origin + direction * candidate
-            wave = self.wave(p.x, p.z)
-            if candidate > 0.001 and ti.abs(p.x) < POOL_HALF_X and ti.abs(p.z) < POOL_HALF_Z and ti.abs(p.y - wave.x) < 0.005:
-                t = candidate
-                normal = ti.Vector([-wave.y, 1.0, -wave.z]).normalized()
+        near, far = 0.001, 1e6
+        bounds = self.sim.bounds[None]
+        lo = ti.Vector([-POOL_HALF_X, bounds.x - 1e-5, -POOL_HALF_Z])
+        hi = ti.Vector([POOL_HALF_X, bounds.y + 1e-5, POOL_HALF_Z])
+        for axis in ti.static(range(3)):
+            if ti.abs(direction[axis]) < 1e-8:
+                if origin[axis] < lo[axis] or origin[axis] > hi[axis]:
+                    far = -1.0
+            else:
+                a, b = (lo[axis] - origin[axis]) / direction[axis], (hi[axis] - origin[axis]) / direction[axis]
+                near, far = ti.max(near, ti.min(a, b)), ti.min(far, ti.max(a, b))
+        if direction.y < -0.0001 and near <= far:
+            current = near
+            p = origin + current * direction
+            du, dv = direction.x / CELL_X, direction.z / CELL_Z
+            u, v = (p.x + POOL_HALF_X) / CELL_X - 0.5, (p.z + POOL_HALF_Z) / CELL_Z - 0.5
+            i = ti.cast(ti.floor(u + (1e-5 if du >= 0 else -1e-5)), ti.i32)
+            j = ti.cast(ti.floor(v + (1e-5 if dv >= 0 else -1e-5)), ti.i32)
+            count = 0
+            while current <= far and t == 1e6 and count < SIM_NX + SIM_NZ + 4:
+                p = origin + current * direction
+                u, v = (p.x + POOL_HALF_X) / CELL_X - 0.5, (p.z + POOL_HALF_Z) / CELL_Z - 0.5
+                fu, fv = u - i, v - j
+                tx, tz = 1e6, 1e6
+                if ti.abs(du) > 1e-8:
+                    tx = current + ((i + 1 if du > 0 else i) - u) / du
+                if ti.abs(dv) > 1e-8:
+                    tz = current + ((j + 1 if dv > 0 else j) - v) / dv
+                end = ti.min(far, ti.min(tx, tz))
+                duration = ti.max(0.0, end - current)
+                i0, i1 = ti.max(0, ti.min(SIM_NX - 1, i)), ti.max(0, ti.min(SIM_NX - 1, i + 1))
+                j0, j1 = ti.max(0, ti.min(SIM_NZ - 1, j)), ti.max(0, ti.min(SIM_NZ - 1, j + 1))
+                h00, h10 = self.sim.h[i0, j0], self.sim.h[i1, j0]
+                h01, h11 = self.sim.h[i0, j1], self.sim.h[i1, j1]
+                ax, az, cross = h10 - h00, h01 - h00, h11 - h10 - h01 + h00
+                aa = -cross * du * dv
+                bb = direction.y - ax * du - az * dv - cross * (fu * dv + fv * du)
+                cc = p.y - (h00 + ax * fu + az * fv + cross * fu * fv)
+                root = 1e6
+                if ti.abs(aa) < 1e-7:
+                    if bb < -1e-7:
+                        q = -cc / bb
+                        if q >= -1e-5 and q <= duration + 1e-5:
+                            root = ti.max(0.0, q)
+                else:
+                    disc = bb * bb - 4 * aa * cc
+                    if disc >= 0.0:
+                        # Stable quadratic formula, avoiding cancellation.
+                        numerator = -0.5 * (bb + (ti.sqrt(disc) if bb >= 0 else -ti.sqrt(disc)))
+                        r0, r1 = numerator / aa, 1e6
+                        if ti.abs(numerator) > 1e-12:
+                            r1 = cc / numerator
+                        for q in ti.static((0, 1)):
+                            candidate = r0 if q == 0 else r1
+                            if candidate >= -1e-5 and candidate <= duration + 1e-5 and bb + 2 * aa * candidate < -1e-7:
+                                root = ti.min(root, ti.max(0.0, candidate))
+                if root < 1e6:
+                    t = current + root
+                    ru, rv = fu + du * root, fv + dv * root
+                    normal = ti.Vector([-(ax + cross * rv) / CELL_X, 1.0, -(az + cross * ru) / CELL_Z]).normalized()
+                if tx <= tz:
+                    i += 1 if du > 0 else -1
+                if tz <= tx:
+                    j += 1 if dv > 0 else -1
+                current = end
+                count += 1
+                if end >= far:
+                    break
         return t, normal
 
     @ti.func
-    def rain_radiance(self, origin, direction):
+    def rain_radiance(self, origin, direction, depth):
         # Analytic ray-streak proximity: each drop draws a short faint streak.
         color = ti.Vector([0.0, 0.0, 0.0])
         count = self.rain.count[None]
@@ -293,7 +448,7 @@ class RainPondRenderer(CourtyardScene):
                     seg_v = e + b * (b * e - d) / denom
                     seg_v = ti.max(0.0, ti.min(0.13, seg_v))
                     ray_t = seg_v * b - d
-                    if ray_t > 0.05:
+                    if 0.05 < ray_t < depth:
                         dist = (w0 + direction * ray_t - s * seg_v).norm()
                         glow = ti.exp(-(dist / 0.0085) ** 2)
                         if glow > 0.003:
@@ -309,10 +464,19 @@ class RainPondRenderer(CourtyardScene):
         water_t, normal = self.water_hit(origin, direction)
         has_water = water_t < opaque_t
         p = origin + direction * water_t
+        geometric_normal = normal
         if has_water:
             footprint = water_t * pixel_angle / ti.max(0.15, ti.abs(direction.y))
             fine = self.detail_gradient(p.x, p.z, clock, footprint)
-            normal = (normal + ti.Vector([-fine.x, 0.0, -fine.y])).normalized()
+            slope = self.sim.filtered_slope(p.x, p.z, footprint) + fine
+            normal = ti.Vector([-slope.x, 1.0, -slope.y]).normalized()
+            # A filtered shading normal cannot face away from a visible
+            # geometric surface; blend only as much as needed at grazing view.
+            view_cos = -direction.dot(normal)
+            geom_cos = -direction.dot(geometric_normal)
+            if view_cos < 0.001:
+                blend = (0.001 - view_cos) / ti.max(1e-6, geom_cos - view_cos)
+                normal = ((1 - ti.min(1.0, blend)) * normal + ti.min(1.0, blend) * geometric_normal).normalized()
         cosine = ti.max(0.0, ti.min(1.0, -direction.dot(normal)))
         eta = 1.0 / 1.333
         root = ti.sqrt(ti.max(0.0, 1.0 - eta * eta * (1.0 - cosine * cosine)))
@@ -332,9 +496,9 @@ class RainPondRenderer(CourtyardScene):
             if has_water:
                 if bounce < reflection_count:
                     ray_direction, weight = water_reflection(-direction, normal, self.water_controls[None].x, bounce, reflection_count)
-                    ray_origin = p + normal * 0.004
+                    ray_origin = p + geometric_normal * 0.004
                 else:
-                    ray_origin, ray_direction = p - normal * 0.004, refracted
+                    ray_origin, ray_direction = p - geometric_normal * 0.004, refracted
                 t, n, base, material = self.geometry(ray_origin, ray_direction)
             shaded = ti.Vector([0.0, 0.0, 0.0])
             if weight > 0.0 or bounce == reflection_count:
@@ -345,18 +509,19 @@ class RainPondRenderer(CourtyardScene):
             elif has_water:
                 thickness = ti.min(t, 8.0)
         if has_water:
-            transmission = ti.exp(-ti.Vector([0.48, 0.18, 0.095]) * thickness / clarity)
-            through_water = color * transmission + ti.Vector([0.035, 0.22, 0.20]) * (1.0 - transmission)
+            # Moderate absorption keeps long bent refraction paths readable
+            # instead of collapsing to black on steep ripple slopes.
+            transmission = ti.exp(-ti.Vector([0.30, 0.115, 0.060]) * thickness / clarity)
+            through_water = color * transmission + ti.Vector([0.045, 0.24, 0.22]) * (1.0 - transmission)
             f0 = ((1.333 - 1.0) / (1.333 + 1.0)) ** 2
             fresnel = f0 + (1.0 - f0) * (1.0 - cosine) ** 5
+            roughness = ti.max(0.045, self.water_controls[None].x)
             color = through_water * (1.0 - fresnel) + reflection
-            glint = ggx_brdf(ti.Vector([0.0, 0.0, 0.0]), ti.max(0.045, self.water_controls[None].x), 0.0,
+            glint = ggx_brdf(ti.Vector([0.0, 0.0, 0.0]), roughness, 0.0,
                              normal, -direction, self.sun_direction(lighting), f0)
             if glint.max() > 0.005:
                 shade = self.visibility(p, normal, self.sun_direction(lighting), 0)
                 color += glint * ti.Vector([1.0, 0.80, 0.52]) * 3.2 * shade
-        if self.rain_controls[None].x > 0.0:
-            color += self.rain_radiance(origin, direction) * self.rain_controls[None].x
         return color
 
     @ti.kernel
@@ -365,6 +530,8 @@ class RainPondRenderer(CourtyardScene):
                clock: ti.f32, clarity: ti.f32, lighting: ti.f32,
                exposure: ti.f32, scale: ti.f32, samples: ti.i32):
         for x, y in self.image:
+            px = (2.0 * (x + 0.5) / self.width - 1.0) * self.width / self.height * scale
+            py = (2.0 * (y + 0.5) / self.height - 1.0) * scale
             color = ti.Vector([0.0, 0.0, 0.0])
             for sample in range(samples):
                 offset = ti.Vector([0.5, 0.5])
@@ -375,11 +542,20 @@ class RainPondRenderer(CourtyardScene):
                 direction = (forward + right * sx + up * sy).normalized()
                 color += self.radiance(eye, direction, clock, clarity, lighting, 2.0 * scale / self.height)
             color /= samples
+            # Rain streaks run once per pixel on the center ray; they are a
+            # subtle overlay, so spatial AA on them is not worth 4x the cost.
+            if self.rain_controls[None].x > 0.0:
+                direction = (forward + right * px + up * py).normalized()
+                depth, _, _, _ = self.geometry(eye, direction)
+                water_depth, _ = self.water_hit(eye, direction)
+                color += self.rain_radiance(eye, direction, ti.min(depth, water_depth)) * self.rain_controls[None].x
             self.post.hdr[x, y] = color
 
     def draw(self, camera, clock, clarity=1.4, lighting=1.0, exposure=1.05):
-        key = (self.sim.steps, lighting)
-        # Retrace only when the simulation or the sun has changed.
+        revision = self.sim.prepare_surface()
+        controls = self.water_controls[None]
+        key = (revision, lighting, float(controls.y), clock if controls.y > 0.0 else 0.0)
+        # Changes while paused (clear, click, fine-wave controls) also invalidate.
         if self._caustic_key is None or (self.water_controls[None].z > 0.0 and key != self._caustic_key):
             self.trace_caustics(clock, lighting, 1)
             self.filter_caustics()
@@ -417,15 +593,15 @@ def parse_args(argv=None):
     parser.add_argument("--lighting", choices=("day", "sunset"), default="day")
     parser.add_argument("--shadow-samples", type=int, choices=(1, 4), default=4)
     parser.add_argument("--no-ao", action="store_true")
-    parser.add_argument("--water-roughness", type=float, default=0.16)
+    parser.add_argument("--water-roughness", type=float, default=0.065)
     parser.add_argument("--reflection-samples", type=int, choices=(1, 4), default=4)
     parser.add_argument("--no-water-detail", action="store_true")
     parser.add_argument("--no-caustics", action="store_true")
     parser.add_argument("--no-bloom", action="store_true")
-    parser.add_argument("--rain", type=float, default=0.55, help="Rain amount from 0 to 1")
-    parser.add_argument("--impact", type=float, default=0.45, help="Drop impact strength")
-    parser.add_argument("--wave-speed", type=float, default=1.3, help="Wave speed in m/s")
-    parser.add_argument("--damping", type=float, default=0.9975, help="Per-step amplitude damping")
+    parser.add_argument("--rain", type=float, default=0.08, help="Rain amount from 0 to 1")
+    parser.add_argument("--impact", type=float, default=0.8, help="Drop impact strength")
+    parser.add_argument("--wave-speed", type=float, default=0.9, help="Wave speed in m/s")
+    parser.add_argument("--damping", type=float, default=0.994, help="Per-step velocity damping")
     parser.add_argument("--preset", choices=("overview", "waterline", "top"), default="overview")
     parser.add_argument("--headless", action="store_true", help="Render without a window and save PNG")
     parser.add_argument("--output", type=Path, default=Path("output/demo_02.png"))
@@ -449,6 +625,13 @@ def parse_args(argv=None):
     return args
 
 
+def simulation_budget(accumulator, elapsed, speed):
+    """Catch up ordinary slow frames; cap long stalls to avoid a spiral."""
+    budget = min(accumulator + min(elapsed, 0.25) * speed, 32 * SIM_DT)
+    steps = int((budget + 1e-10) / SIM_DT)
+    return steps, max(0.0, budget - steps * SIM_DT)
+
+
 def main(argv=None):
     args = parse_args(argv)
     cache_path = Path(__file__).resolve().parent / ".taichi-cache"
@@ -456,35 +639,38 @@ def main(argv=None):
             offline_cache_file_path=str(cache_path), random_seed=17)
     renderer = RainPondRenderer(args.width, args.height, args.samples)
     renderer.light_controls[None] = [math.radians(1.2), args.shadow_samples, 0.0 if args.no_ao else 0.65, 1.0]
-    renderer.water_controls[None] = [args.water_roughness, 0.0 if args.no_water_detail else 1.0, 0.0 if args.no_caustics else 1.0, args.reflection_samples]
+    renderer.water_controls[None] = [args.water_roughness, 0.0 if args.no_water_detail else 0.3, 0.0 if args.no_caustics else 1.0, args.reflection_samples]
     renderer.post_controls[None] = [0.0 if args.no_bloom else 0.08, 1.0, 0.12]
-    renderer.rain_controls[None] = [0.6, args.impact]
+    renderer.rain_controls[None] = [0.75, args.impact]
     camera = OrbitCamera()
     camera.preset(args.preset)
     rain_amount, wave_speed, damping, speed = args.rain, args.wave_speed, args.damping, 1.0
-    active_drops = max(0, int(round(rain_amount * MAX_DROPS)))
+    renderer.rain.count[None] = int(round(rain_amount * MAX_DROPS))
     lighting = 1.0 if args.lighting == "day" else 0.0
-    clarity, exposure = 1.4, 1.05
+    clarity, exposure = 1.0, 1.05
     clock = 0.0
 
-    def advance(dt, substeps):
+    def advance(substeps):
         nonlocal clock
-        renderer.rain.count[None] = max(0, min(MAX_DROPS, int(round(rain_amount * MAX_DROPS))))
-        if renderer.rain.count[None] > 0:
-            renderer.rain.update(dt, renderer.rain_controls[None].y, renderer.rain.count[None], 1.0)
-        renderer.sim.advance(wave_speed, damping, substeps)
-        clock += dt * speed
+        count = max(0, min(MAX_DROPS, int(round(rain_amount * MAX_DROPS))))
+        renderer.rain.count[None] = count
+        # Rain, waves and fine-wave time share the same fixed simulation clock.
+        for _ in range(substeps):
+            if count:
+                renderer.rain.update(SIM_DT, renderer.rain_controls[None].y, count, 1.0)
+            renderer.sim.advance(wave_speed, damping, 1)
+        clock += substeps * SIM_DT
 
     # Warmup reaches steady rain before the first visible frame.
     warmup_steps = int(max(0.0, args.time) * 120.0)
     for _ in range(warmup_steps):
-        advance(SIM_DT, 1)
+        advance(1)
     if args.headless:
         start = time.perf_counter()
         timings = []
         for frame in range(args.frames):
             frame_start = time.perf_counter()
-            advance(1.0 / 60.0, 2)
+            advance(2)
             renderer.draw(camera, clock, clarity, lighting, exposure)
             ti.sync()
             timings.append(time.perf_counter() - frame_start)
@@ -513,7 +699,7 @@ def main(argv=None):
     print("Click water: ripple | Drag LMB orbit | RMB pan | W/S zoom | 1/2/3 views | R reset | Space pause | N step | A orbit | H panel | P screenshot | Esc quit")
     while window.running and (not args.window_frames or window_frames < args.window_frames):
         now = time.perf_counter()
-        dt = min(now - previous_time, 0.05)
+        dt = min(now - previous_time, 0.25)
         previous_time = now
         step, save_frame = False, False
         mouse = np.array(window.get_cursor_pos())
@@ -537,14 +723,15 @@ def main(argv=None):
                 camera.preset("overview")
                 renderer.samples = args.samples
                 renderer.light_controls[None] = [math.radians(1.2), args.shadow_samples, 0.0 if args.no_ao else 0.65, 1.0]
-                renderer.water_controls[None] = [args.water_roughness, 0.0 if args.no_water_detail else 1.0, 0.0 if args.no_caustics else 1.0, args.reflection_samples]
+                renderer.water_controls[None] = [args.water_roughness, 0.0 if args.no_water_detail else 0.3, 0.0 if args.no_caustics else 1.0, args.reflection_samples]
                 renderer.post_controls[None] = [0.0 if args.no_bloom else 0.08, 1.0, 0.12]
-                renderer.rain_controls[None] = [0.6, args.impact]
+                renderer.rain_controls[None] = [0.75, args.impact]
+                renderer.bed_detail[None] = 0.20
                 renderer.sim.clear()
                 renderer.rain.reset()
                 rain_amount, wave_speed, damping, speed = args.rain, args.wave_speed, args.damping, 1.0
                 lighting = 1.0 if args.lighting == "day" else 0.0
-                clarity, exposure, clock, sim_accumulator = 1.4, 1.05, 0.0, 0.0
+                clarity, exposure, clock, sim_accumulator = 1.0, 1.05, 0.0, 0.0
                 paused, auto_orbit = False, False
             elif key == "p":
                 save_frame = True
@@ -560,11 +747,11 @@ def main(argv=None):
                 click_camera_moved = True
         elif click_start is not None:
             if drag_in_scene and not click_camera_moved:
-                point = water_pick(camera, click_start[0], click_start[1], args.width, args.height)
+                point = water_pick(camera, click_start[0], 1.0 - click_start[1], args.width, args.height)
                 if point is not None:
-                    renderer.sim.inject(point[0], point[1], 0.06, 0.05)
+                    renderer.sim.inject(point[0], point[1], 0.10, 0.012)
             click_start = None
-        if previous_mouse is not None and drag_in_scene and click_camera_moved:
+        if previous_mouse is not None and drag_in_scene and (click_camera_moved or window.is_pressed(ti.ui.RMB)):
             delta = mouse - previous_mouse
             if window.is_pressed(ti.ui.LMB):
                 camera.orbit(*delta)
@@ -600,7 +787,7 @@ def main(argv=None):
                 finish[2] = gui.slider_float("Vignette", finish[2], 0.0, 0.3)
                 renderer.post_controls[None] = finish
                 gui.text("Zero strength disables an effect")
-                gui.text("No temporal accumulation")
+                renderer.bed_detail[None] = gui.slider_float("Bed texture", renderer.bed_detail[None], 0.0, 1.0)
             with gui.sub_window("RAIN POND / 02", 0.02, 0.025, 0.30, 0.82):
                 gui.text("Wave equation / finite difference / rain")
                 gui.text(f"Frame {frame_ms:.1f} ms (includes UI)")
@@ -636,12 +823,10 @@ def main(argv=None):
                 gui.text("W/S or arrows: zoom / R: reset")
                 gui.text("H: hide panel / P: save / Esc: exit")
         if not paused:
-            sim_accumulator = min(sim_accumulator + dt * speed, 8 * SIM_DT)
-            substeps = int(sim_accumulator / SIM_DT)
-            sim_accumulator -= substeps * SIM_DT
-            advance(dt * speed, substeps)
+            substeps, sim_accumulator = simulation_budget(sim_accumulator, dt, speed)
+            advance(substeps)
         elif step:
-            advance(1.0 / 60.0, 2)
+            advance(2)
         renderer.draw(camera, clock, clarity, lighting, exposure)
         if save_frame:
             print(f"Saved {renderer.save(args.output)}")

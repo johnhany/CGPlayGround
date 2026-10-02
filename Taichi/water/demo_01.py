@@ -187,12 +187,13 @@ class PoolRenderer(CourtyardScene):
             elif has_water:
                 thickness = ti.min(t, 8.0)
         if has_water:
-            transmission = ti.exp(-ti.Vector([0.48, 0.18, 0.095]) * thickness / clarity)
-            through_water = color * transmission + ti.Vector([0.035, 0.22, 0.20]) * (1.0 - transmission)
+            transmission = ti.exp(-ti.Vector([0.30, 0.115, 0.060]) * thickness / clarity)
+            through_water = color * transmission + ti.Vector([0.045, 0.24, 0.22]) * (1.0 - transmission)
             f0 = ((1.333 - 1.0) / (1.333 + 1.0)) ** 2
             fresnel = f0 + (1.0 - f0) * (1.0 - cosine) ** 5
+            roughness = ti.max(0.045, self.water_controls[None].x)
             color = through_water * (1.0 - fresnel) + reflection
-            glint = ggx_brdf(ti.Vector([0.0, 0.0, 0.0]), ti.max(0.045, self.water_controls[None].x), 0.0, normal, -direction, self.sun_direction(lighting), f0)
+            glint = ggx_brdf(ti.Vector([0.0, 0.0, 0.0]), roughness, 0.0, normal, -direction, self.sun_direction(lighting), f0)
             if glint.max() > 0.005:
                 shade = self.visibility(p, normal, self.sun_direction(lighting), 0)
                 color += glint * ti.Vector([1.0, 0.80, 0.52]) * 3.2 * shade
