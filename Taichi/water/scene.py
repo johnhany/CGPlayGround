@@ -115,6 +115,10 @@ class CourtyardScene:
         self.group_extent = ti.Vector.field(3, ti.f32, shape=12)
         self.group_range = ti.Vector.field(2, ti.i32, shape=12)
         self.boxes, self.leaves, self.groups = 0, 0, 0
+        self.build_static()
+
+    def build_static(self):
+        """Populate the static scene; ocean demos override with their own."""
         self._build_courtyard()
 
     def _build_courtyard(self):

@@ -1,7 +1,8 @@
 # Demo 02 · 雨落池塘
 
 完整系列方案见 [WATER_DEMOS.md](WATER_DEMOS.md)。前一个 demo 见
-[demo_01 说明](README.md)。
+[demo_01 说明](README.md)，下一个 demo 见
+[03 日落海面](demo_03.md)。
 
 ![雨落池塘预览](preview_rain.png)
 
