@@ -1,7 +1,8 @@
 # Demo 03 · 日落海面
 
 完整系列方案见 [WATER_DEMOS.md](WATER_DEMOS.md)。前一个 demo 见
-[demo_02 雨落池塘](demo_02.md)。
+[demo_02 雨落池塘](demo_02.md)，下一个 demo 见
+[demo_04 浮标与小船](demo_04.md)。
 
 ![日落海面预览](preview_sunset.png)
 

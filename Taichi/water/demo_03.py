@@ -159,6 +159,16 @@ class GerstnerSpectrum:
         return y
 
     @ti.func
+    def vertical_velocity(self, x, z, t):
+        """Time derivative of the height field (envelope varies slowly)."""
+        env = self.envelope(x, z)
+        vy = 0.0
+        for i in ti.static(range(WAVE_COUNT)):
+            f = self.k[i] * (self.dir[i].x * x + self.dir[i].y * z) - self.omega[i] * t + self.phase[i]
+            vy -= self.amp[i] * env * self.omega[i] * ti.cos(f)
+        return vy
+
+    @ti.func
     def surface(self, x, z, t):
         """Vertical displacement and the Gerstner normal with envelope."""
         env = self.envelope(x, z)
@@ -236,6 +246,21 @@ class SunsetOceanRenderer(CourtyardScene):
         box((130.0, 0.5, -110.0), (10.0, 8.0, 10.0), basalt2, bevel=2.5)
 
     @ti.func
+    def extra_height(self, x, z, clock):
+        """Extra height-field displacement; subclasses override (demo 04 wake)."""
+        return 0.0
+
+    @ti.func
+    def extra_slope(self, x, z, clock):
+        """Extra height-field gradient; subclasses override (demo 04 wake)."""
+        return ti.Vector([0.0, 0.0])
+
+    @ti.func
+    def foam(self, p, clock, lighting):
+        """Additive foam color at a water-surface point; zero by default."""
+        return ti.Vector([0.0, 0.0, 0.0])
+
+    @ti.func
     def floor_material(self, p, clock, amplitude):
         # Dark volcanic sand; mostly seen through a long absorbing water path.
         ripple = 0.5 + 0.5 * ti.sin(p.x * 2.1 + 1.3 * ti.sin(p.z * 1.7))
@@ -277,7 +302,7 @@ class SunsetOceanRenderer(CourtyardScene):
         if near <= far:
             current = near
             p = origin + direction * current
-            h = self.spectrum.height(p.x, p.z, clock)
+            h = self.spectrum.height(p.x, p.z, clock) + self.extra_height(p.x, p.z, clock)
             if p.y <= h:
                 t = current
             else:
@@ -288,13 +313,14 @@ class SunsetOceanRenderer(CourtyardScene):
                     step = ti.min(ti.max(error * 1.4, MARCH_MIN_STEP), limit)
                     next_t = ti.min(current + step, far)
                     p = origin + direction * next_t
-                    h = self.spectrum.height(p.x, p.z, clock)
+                    h = self.spectrum.height(p.x, p.z, clock) + self.extra_height(p.x, p.z, clock)
                     if p.y <= h:
                         lo_t, hi_t = current, next_t
                         for _ in ti.static(range(BISECT_STEPS)):
                             mid = 0.5 * (lo_t + hi_t)
                             pm = origin + direction * mid
-                            if pm.y <= self.spectrum.height(pm.x, pm.z, clock):
+                            hm = self.spectrum.height(pm.x, pm.z, clock) + self.extra_height(pm.x, pm.z, clock)
+                            if pm.y <= hm:
                                 hi_t = mid
                             else:
                                 lo_t = mid
@@ -336,7 +362,7 @@ class SunsetOceanRenderer(CourtyardScene):
         geometric_normal = normal
         if has_water:
             footprint = water_t * pixel_angle / ti.max(0.15, ti.abs(direction.y))
-            fine = self.detail_gradient(p.x, p.z, clock, footprint)
+            fine = self.detail_gradient(p.x, p.z, clock, footprint) + self.extra_slope(p.x, p.z, clock)
             normal = (normal + ti.Vector([-fine.x, 0.0, -fine.y])).normalized()
             # A filtered shading normal cannot face away from a visible
             # geometric surface; blend only as much as needed at grazing view.
@@ -394,6 +420,7 @@ class SunsetOceanRenderer(CourtyardScene):
             if glint.max() > 0.005:
                 shade = self.visibility(p, normal, self.sun_direction(lighting), 0)
                 color += glint * ti.Vector([1.0, 0.80, 0.52]) * 3.2 * shade
+            color += self.foam(p, clock, lighting)
         primary_t = ti.min(water_t, opaque_t)
         if primary_t < 1e5:
             # Distance haze toward the horizon color at the same azimuth.
