@@ -261,6 +261,50 @@ class SunsetOceanRenderer(CourtyardScene):
         return ti.Vector([0.0, 0.0, 0.0])
 
     @ti.func
+    def wave_amplitude(self):
+        """Height-field amplitude used for march bounds and upwelling lift."""
+        return self.spectrum.amp_total[None]
+
+    @ti.func
+    def wave_height(self, x, z, clock):
+        """Intersection height field; subclasses override (demo 05 FFT)."""
+        return self.spectrum.height(x, z, clock)
+
+    @ti.func
+    def wave_surface(self, x, z, clock):
+        """Height and shading normal at a surface point; subclass override."""
+        return self.spectrum.surface(x, z, clock)
+
+    @ti.func
+    def wave_bounds(self):
+        amplitude = self.wave_amplitude()
+        return ti.Vector([-1.02 * amplitude, 1.02 * amplitude])
+
+    @ti.func
+    def seabed_depth(self):
+        return SEABED
+
+    @ti.func
+    def shading_normal(self, p, clock, footprint, geometric_normal):
+        fine = self.detail_gradient(p.x, p.z, clock, footprint) + self.extra_slope(p.x, p.z, clock)
+        return (geometric_normal + ti.Vector([-fine.x, 0.0, -fine.y])).normalized()
+
+    @ti.func
+    def water_body(self, color, thickness, clarity, wave_y, normal, lighting):
+        transmission = ti.exp(-ti.Vector([0.34, 0.12, 0.065]) * thickness / clarity)
+        through_water = color * transmission + ti.Vector([0.008, 0.030, 0.042]) * (1.0 - transmission)
+        lift = 1.0 + 0.5 * wave_y / ti.max(0.05, self.wave_amplitude())
+        return through_water * lift
+
+    @ti.func
+    def water_depth_limit(self):
+        return 12.0
+
+    @ti.func
+    def foam_filtered(self, p, clock, lighting, footprint):
+        return self.foam(p, clock, lighting)
+
+    @ti.func
     def floor_material(self, p, clock, amplitude):
         # Dark volcanic sand; mostly seen through a long absorbing water path.
         ripple = 0.5 + 0.5 * ti.sin(p.x * 2.1 + 1.3 * ti.sin(p.z * 1.7))
@@ -273,7 +317,7 @@ class SunsetOceanRenderer(CourtyardScene):
         closest, material = 1e6, -1
         normal, color = ti.Vector([0.0, 1.0, 0.0]), ti.Vector([0.5, 0.5, 0.5])
         if direction.y < -1e-6:
-            t = (SEABED - origin.y) / direction.y
+            t = (self.seabed_depth() - origin.y) / direction.y
             if t > 0.001:
                 closest, material = t, 6
         for i in range(self.boxes):
@@ -290,8 +334,8 @@ class SunsetOceanRenderer(CourtyardScene):
         t = 1e6
         normal = ti.Vector([0.0, 1.0, 0.0])
         surf_y = 0.0
-        amp = self.spectrum.amp_total[None]
-        lo, hi = -1.02 * amp, 1.02 * amp
+        bounds = self.wave_bounds()
+        lo, hi = bounds.x, bounds.y
         near, far = 0.001, FAR_PLANE
         if ti.abs(direction.y) < 1e-8:
             if origin.y < lo or origin.y > hi:
@@ -302,7 +346,7 @@ class SunsetOceanRenderer(CourtyardScene):
         if near <= far:
             current = near
             p = origin + direction * current
-            h = self.spectrum.height(p.x, p.z, clock) + self.extra_height(p.x, p.z, clock)
+            h = self.wave_height(p.x, p.z, clock) + self.extra_height(p.x, p.z, clock)
             if p.y <= h:
                 t = current
             else:
@@ -313,13 +357,13 @@ class SunsetOceanRenderer(CourtyardScene):
                     step = ti.min(ti.max(error * 1.4, MARCH_MIN_STEP), limit)
                     next_t = ti.min(current + step, far)
                     p = origin + direction * next_t
-                    h = self.spectrum.height(p.x, p.z, clock) + self.extra_height(p.x, p.z, clock)
+                    h = self.wave_height(p.x, p.z, clock) + self.extra_height(p.x, p.z, clock)
                     if p.y <= h:
                         lo_t, hi_t = current, next_t
                         for _ in ti.static(range(BISECT_STEPS)):
                             mid = 0.5 * (lo_t + hi_t)
                             pm = origin + direction * mid
-                            hm = self.spectrum.height(pm.x, pm.z, clock) + self.extra_height(pm.x, pm.z, clock)
+                            hm = self.wave_height(pm.x, pm.z, clock) + self.extra_height(pm.x, pm.z, clock)
                             if pm.y <= hm:
                                 hi_t = mid
                             else:
@@ -329,7 +373,10 @@ class SunsetOceanRenderer(CourtyardScene):
                         current = next_t
                     count += 1
             if t < 1e6:
-                surf_y, normal = self.spectrum.surface(p.x, p.z, clock)
+                # Bisection changes t: sample at the refined hit, not at the
+                # last marching endpoint (which can lie inside the water).
+                hit_point = origin + direction * t
+                surf_y, normal = self.wave_surface(hit_point.x, hit_point.z, clock)
         return t, normal, surf_y
 
     @ti.func
@@ -360,10 +407,10 @@ class SunsetOceanRenderer(CourtyardScene):
         has_water = water_t < opaque_t
         p = origin + direction * water_t
         geometric_normal = normal
+        footprint = 0.0
         if has_water:
             footprint = water_t * pixel_angle / ti.max(0.15, ti.abs(direction.y))
-            fine = self.detail_gradient(p.x, p.z, clock, footprint) + self.extra_slope(p.x, p.z, clock)
-            normal = (normal + ti.Vector([-fine.x, 0.0, -fine.y])).normalized()
+            normal = self.shading_normal(p, clock, footprint, geometric_normal)
             # A filtered shading normal cannot face away from a visible
             # geometric surface; blend only as much as needed at grazing view.
             view_cos = -direction.dot(normal)
@@ -401,16 +448,9 @@ class SunsetOceanRenderer(CourtyardScene):
             if has_water and bounce < reflection_count:
                 reflection += shaded * weight / reflection_count
             elif has_water:
-                thickness = ti.min(t, 12.0)
+                thickness = ti.min(t, self.water_depth_limit())
         if has_water:
-            # Moderate absorption keeps long bent refraction paths readable
-            # instead of collapsing to black on steep wave flanks.
-            transmission = ti.exp(-ti.Vector([0.34, 0.12, 0.065]) * thickness / clarity)
-            through_water = color * transmission + ti.Vector([0.008, 0.030, 0.042]) * (1.0 - transmission)
-            # Wave heights modulate the upwelling term so swell stays visible
-            # from above, where refraction dominates and slope cues vanish.
-            lift = 1.0 + 0.5 * wave_y / ti.max(0.05, self.spectrum.amp_total[None])
-            through_water *= lift
+            through_water = self.water_body(color, thickness, clarity, wave_y, normal, lighting)
             f0 = ((1.333 - 1.0) / (1.333 + 1.0)) ** 2
             fresnel = f0 + (1.0 - f0) * (1.0 - cosine) ** 5
             roughness = ti.max(0.045, self.water_controls[None].x)
@@ -420,13 +460,18 @@ class SunsetOceanRenderer(CourtyardScene):
             if glint.max() > 0.005:
                 shade = self.visibility(p, normal, self.sun_direction(lighting), 0)
                 color += glint * ti.Vector([1.0, 0.80, 0.52]) * 3.2 * shade
-            color += self.foam(p, clock, lighting)
+            color += self.foam_filtered(p, clock, lighting, footprint)
         primary_t = ti.min(water_t, opaque_t)
         if primary_t < 1e5:
-            # Distance haze toward the horizon color at the same azimuth.
+            # Distance haze toward the sky color. Rays pointing downward fade
+            # toward the zenith instead of the azimuth horizon: sampling the
+            # horizon pole from a top view sweeps longitude per pixel and
+            # paints radial spokes onto the water.
             fog = 1.0 - ti.exp(-3.0 * (primary_t / FOG_DISTANCE) ** 2)
-            horizon = ti.Vector([direction.x, 0.02, direction.z]).normalized()
-            fog_color = self.environment.sample_map(self.environment.environment, horizon, lighting)
+            overhead = ti.max(0.0, -direction.y)
+            horizon = ti.Vector([direction.x,
+                                 0.02 + 0.65 * overhead * overhead, direction.z])
+            fog_color = self.environment.sample_map(self.environment.environment, horizon.normalized(), lighting)
             color = color * (1.0 - fog) + fog_color * fog
         return color
 

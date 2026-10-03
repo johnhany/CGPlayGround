@@ -1,7 +1,8 @@
 # Demo 04 · 浮标与小船
 
 完整系列方案见 [WATER_DEMOS.md](WATER_DEMOS.md)。前一个 demo 见
-[demo_03 日落海面](demo_03.md)。
+[demo_03 日落海面](demo_03.md)，下一个 demo 见
+[demo_05 风场海洋](demo_05.md)。
 
 ![浮标与小船预览](preview_harbor.png)
 
