@@ -480,6 +480,19 @@ class CourtyardScene:
         return color, n
 
     @ti.func
+    def surface_properties(self, p, material, properties):
+        return properties
+
+    @ti.func
+    def surface_sun_visibility(self, p, normal, material, lighting, detail):
+        shade = 1.0
+        if material == 6 and self.water_controls[None].z > 0.0:
+            shade = 1.0 - self.water_controls[None].z + self.water_controls[None].z * self.caustic_density(p)
+        elif normal.dot(self.sun_direction(lighting)) > 0.0:
+            shade = self.visibility(p, normal, self.sun_direction(lighting), detail)
+        return shade
+
+    @ti.func
     def shade_surface(self, origin, direction, t, normal, base, material, clock, lighting, amplitude, detail):
         color = self.sky(direction, lighting)
         if material >= 0:
@@ -515,7 +528,7 @@ class CourtyardScene:
                     base = ti.Vector([0.43, 0.44, 0.37]) * (0.94 + 0.04 * grain)
             elif material == 6:
                 base, normal = self.floor_material(p, clock, amplitude)
-            properties = self.materials[material]
+            properties = self.surface_properties(p, material, self.materials[material])
             roughness, metallic, dielectric_f0 = properties.x, properties.y, properties.z
             if material == 5 and 3.6 < p.x < 6.2 and ti.abs(p.z) < 4.4:
                 roughness = 0.48
@@ -544,11 +557,7 @@ class CourtyardScene:
             indirect += env_specular * (f0 * lut.x + lut.y) * (1.0 - roughness + roughness * ao)
             color = indirect * self.light_controls[None].w
             sun = self.sun_direction(lighting)
-            shade = 1.0
-            if material == 6 and self.water_controls[None].z > 0.0:
-                shade = 1.0 - self.water_controls[None].z + self.water_controls[None].z * self.caustic_density(p)
-            elif normal.dot(sun) > 0.0:
-                shade = self.visibility(p, geometric_normal, sun, detail)
+            shade = self.surface_sun_visibility(p, geometric_normal, material, lighting, detail)
             light_color = (ti.Vector([1.0, 0.94, 0.82]) * lighting + ti.Vector([1.0, 0.52, 0.24]) * (1.0 - lighting)) * 3.2
             color += ggx_brdf(base, roughness, metallic, normal, view, sun, dielectric_f0) * light_color * shade
             # Thin leaves get a modest transmitted sunlight approximation.

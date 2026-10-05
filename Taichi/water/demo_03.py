@@ -305,6 +305,14 @@ class SunsetOceanRenderer(CourtyardScene):
         return self.foam(p, clock, lighting)
 
     @ti.func
+    def water_ray_offset(self, p, normal):
+        return 0.004
+
+    @ti.func
+    def composite_foam(self, color, p, clock, lighting, footprint):
+        return color + self.foam_filtered(p, clock, lighting, footprint)
+
+    @ti.func
     def floor_material(self, p, clock, amplitude):
         # Dark volcanic sand; mostly seen through a long absorbing water path.
         ripple = 0.5 + 0.5 * ti.sin(p.x * 2.1 + 1.3 * ti.sin(p.z * 1.7))
@@ -425,7 +433,9 @@ class SunsetOceanRenderer(CourtyardScene):
         color, reflection = ti.Vector([0.0, 0.0, 0.0]), ti.Vector([0.0, 0.0, 0.0])
         thickness = 0.0
         reflection_count = 0
+        ray_offset = 0.004
         if has_water:
+            ray_offset = self.water_ray_offset(p, geometric_normal)
             reflection_count = ti.cast(self.water_controls[None].w, ti.i32)
             if self.water_controls[None].x <= 0.001:
                 reflection_count = 1
@@ -437,9 +447,9 @@ class SunsetOceanRenderer(CourtyardScene):
             if has_water:
                 if bounce < reflection_count:
                     ray_direction, weight = water_reflection(-direction, normal, self.water_controls[None].x, bounce, reflection_count)
-                    ray_origin = p + geometric_normal * 0.004
+                    ray_origin = p + geometric_normal * ray_offset
                 else:
-                    ray_origin, ray_direction = p - geometric_normal * 0.004, refracted
+                    ray_origin, ray_direction = p - geometric_normal * ray_offset, refracted
                 t, n, base, material = self.geometry(ray_origin, ray_direction)
             shaded = ti.Vector([0.0, 0.0, 0.0])
             if weight > 0.0 or bounce == reflection_count:
@@ -460,7 +470,7 @@ class SunsetOceanRenderer(CourtyardScene):
             if glint.max() > 0.005:
                 shade = self.visibility(p, normal, self.sun_direction(lighting), 0)
                 color += glint * ti.Vector([1.0, 0.80, 0.52]) * 3.2 * shade
-            color += self.foam_filtered(p, clock, lighting, footprint)
+            color = self.composite_foam(color, p, clock, lighting, footprint)
         primary_t = ti.min(water_t, opaque_t)
         if primary_t < 1e5:
             # Distance haze toward the sky color. Rays pointing downward fade

@@ -1,7 +1,8 @@
 # Demo 05 · 风场海洋
 
 完整系列方案见 [WATER_DEMOS.md](WATER_DEMOS.md)。前一个 demo 见
-[demo_04 浮标与小船](demo_04.md)。
+[demo_04 浮标与小船](demo_04.md)，下一个 demo 见
+[demo_06 沙滩与礁石](demo_06.md)。
 
 ![风场海洋预览](preview_windsea.png)
 
