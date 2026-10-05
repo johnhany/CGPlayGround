@@ -484,6 +484,10 @@ class CourtyardScene:
         return properties
 
     @ti.func
+    def surface_sun_color(self, p, material, lighting, color):
+        return color
+
+    @ti.func
     def surface_sun_visibility(self, p, normal, material, lighting, detail):
         shade = 1.0
         if material == 6 and self.water_controls[None].z > 0.0:
@@ -559,6 +563,7 @@ class CourtyardScene:
             sun = self.sun_direction(lighting)
             shade = self.surface_sun_visibility(p, geometric_normal, material, lighting, detail)
             light_color = (ti.Vector([1.0, 0.94, 0.82]) * lighting + ti.Vector([1.0, 0.52, 0.24]) * (1.0 - lighting)) * 3.2
+            light_color = self.surface_sun_color(p, material, lighting, light_color)
             color += ggx_brdf(base, roughness, metallic, normal, view, sun, dielectric_f0) * light_color * shade
             # Thin leaves get a modest transmitted sunlight approximation.
             if material == 2:
