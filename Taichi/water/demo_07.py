@@ -418,6 +418,10 @@ class DiveRenderer(ShoreRenderer):
         return gradient*self.water_controls[None].y*self.smooth(.05,.5,depth)*ti.min(1.,clock*.5)
 
     @ti.func
+    def bed_ripple_strength(self):
+        return 1.0
+
+    @ti.func
     def floor_material(self,p,clock,amplitude):
         base,normal = ShoreRenderer.floor_material(self,p,clock,amplitude)
         depth = self.sea.sample_depth(p.x,p.z)
@@ -426,7 +430,7 @@ class DiveRenderer(ShoreRenderer):
         noise = self.sand_sample(p.x*.24,p.z*.24,footprint*.24)
         phase = 14.0*(p.x*.94+p.z*.34)+noise.x*2.0
         reef = ti.min(1.,ti.max(0.,(shore_terrain(p.x,p.z)-.045*(p.x-4.))*.9))
-        fade *= 1-reef
+        fade *= (1-reef)*self.bed_ripple_strength()
         base *= 1+fade*.12*ti.sin(phase)
         normal = (normal+ti.Vector([-.025*.94,0.,-.025*.34])*ti.cos(phase)*fade).normalized()
         return base,normal
@@ -780,6 +784,10 @@ class DiveRenderer(ShoreRenderer):
         self.blend_waterline(0.,0.,1.,.5)
         self.draw(camera,clock,clarity,lighting,exposure)
 
+    def composite_effects(self,eye,forward,right,up,scale,clock,lighting,clarity):
+        """Extension point for transparent effects before shared postprocessing."""
+        pass
+
     def draw(self,camera,clock,clarity=1.4,lighting=0.,exposure=1.05):
         if self.samples > self.sample_capacity:
             raise ValueError("samples exceed the renderer's allocated sample capacity")
@@ -805,6 +813,7 @@ class DiveRenderer(ShoreRenderer):
             self._draw_underwater(eye,forward,right,up,clock,clarity,lighting,exposure,scale)
         else:
             self.render_above(eye,forward,right,up,clock,clarity,lighting,exposure,scale,self.samples)
+        self.composite_effects(eye,forward,right,up,scale,clock,lighting,clarity)
         bloom,threshold,vignette = self.post_controls[None]
         self.post.apply(exposure,bloom,threshold,vignette)
 
