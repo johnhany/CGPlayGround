@@ -406,3 +406,6 @@ FodyWeavers.xsd
 */output
 
 */imgui.ini
+
+.playwright-mcp/
+.DS_Store

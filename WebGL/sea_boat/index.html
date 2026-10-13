@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>海面小船 · 渲染风格试验场 | Three.js 渲染示例</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%2317a3cf'/></svg>">
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #d4eef8;
+    }
+    canvas {
+      display: block;
+    }
+    #info {
+      position: fixed;
+      left: 16px;
+      bottom: 14px;
+      color: #40718c;
+      font: 12px/1.8 ui-monospace, Menlo, Consolas, monospace;
+      letter-spacing: 0.06em;
+      user-select: none;
+      pointer-events: none;
+    }
+    #info b {
+      color: #16537a;
+      font-weight: 600;
+    }
+    #style-switch {
+      position: fixed;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      z-index: 10;
+    }
+    #style-switch button {
+      font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace;
+      letter-spacing: 0.04em;
+      padding: 8px 11px;
+      border-radius: 15px;
+      cursor: pointer;
+      border: 1px solid rgba(22, 83, 122, 0.35);
+      background: rgba(255, 255, 255, 0.6);
+      color: #16537a;
+      backdrop-filter: blur(6px);
+      white-space: nowrap;
+    }
+    #style-switch button.active {
+      background: #16537a;
+      color: #ffffff;
+      border-color: #16537a;
+    }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="style-switch">
+    <button data-style="A" class="active">方案 A · 吉卜力晴海</button>
+    <button data-style="B">方案 B · 低多边形海面</button>
+    <button data-style="C">方案 C · 风之杖卡通海</button>
+    <button data-style="D">方案 D · 半写实明亮海</button>
+    <button data-style="E">方案 E · 浮世绘海浪</button>
+  </div>
+
+  <div id="info">
+    <b>海面小船</b> · 渲染风格试验场 · Gerstner 波 + CPU 浮力采样<br>
+    拖动旋转 · 滚轮缩放 · 右键平移 · 数字键 1 至 5 与顶部按钮切换画面风格 · 右上角面板调参
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

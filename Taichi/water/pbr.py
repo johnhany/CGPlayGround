@@ -10,6 +10,18 @@ import math
 import numpy as np
 import taichi as ti
 
+# Night-scene moon direction, shared by the baked night environment, the
+# visible moon disk in night_lake/sky.py, and later the water glint key light.
+# The lake camera looks along +Z; the moon sits ahead and to the right at
+# roughly 30 degrees of elevation.
+MOON_AZIMUTH = -0.55
+MOON_ELEVATION = 0.45
+MOON_DIRECTION = np.array([
+    math.sin(MOON_AZIMUTH) * math.cos(MOON_ELEVATION),
+    math.sin(MOON_ELEVATION),
+    math.cos(MOON_AZIMUTH) * math.cos(MOON_ELEVATION),
+], dtype=np.float32)
+
 
 @ti.func
 def fresnel_schlick(cosine, f0):
@@ -59,18 +71,52 @@ def direction_grid(width, height):
     return np.stack([np.sin(lat) * np.sin(lon), np.cos(lat), np.sin(lat) * np.cos(lon)], axis=-1)
 
 
-def procedural_environment(directions, daylight):
+def _night_environment(directions):
+    """Deep night sky: dark blue vault, dim cloud bands, a soft moon glow."""
     y = directions[..., 1]
     azimuth = np.arctan2(directions[..., 0], directions[..., 2])
     t = np.clip(y, 0, 1)[..., None] ** 0.55
-    horizon = np.array([0.88, 1.06, 1.24]) if daylight else np.array([1.35, 0.59, 0.26])
-    zenith = np.array([0.17, 0.39, 0.78]) if daylight else np.array([0.16, 0.23, 0.47])
+    horizon = np.array([0.030, 0.042, 0.066])
+    zenith = np.array([0.006, 0.010, 0.026])
+    color = horizon * (1 - t) + zenith * t
+    # Dark cloud bands keep the same structure as the day and sunset skies.
+    cloud = np.sin(azimuth * 3.0 + y * 8.0) * np.sin(azimuth * 5.0 - y * 4.0)
+    cloud = np.clip((cloud - 0.12) * 1.7, 0, 1) * np.clip(y * 6, 0, 1)
+    cloud *= np.clip((0.85 - y) * 3, 0, 1)
+    cloud_color = np.array([0.028, 0.036, 0.058])
+    color = color * (1 - cloud[..., None] * 0.6) + cloud_color * cloud[..., None] * 0.6
+    # Faint silver lining on the cloud bands near the moon azimuth.
+    proximity = np.clip(directions @ MOON_DIRECTION, 0, 1) ** 24
+    color += proximity[..., None] * cloud[..., None] * np.array([0.06, 0.065, 0.07])
+    # Broad, soft moonlight glow keeps IBL consistent with the visible sky.
+    glow = np.clip(directions @ MOON_DIRECTION, 0, 1) ** 24
+    color += glow[..., None] * np.array([0.030, 0.033, 0.040])
+    # The distant ridge reads as a dark silhouette against the horizon.
+    ridge = 0.028 + 0.018 * np.sin(azimuth * 5) + 0.01 * np.sin(azimuth * 13)
+    hill = (y >= 0) & (y < ridge)
+    color = np.where(hill[..., None], np.array([0.008, 0.011, 0.016]), color)
+    ground = np.broadcast_to([0.005, 0.006, 0.009], color.shape)
+    return np.where((y < 0)[..., None], ground, color).astype(np.float32)
+
+
+def procedural_environment(directions, daylight):
+    # Three variants: 0 sunset, 1 day, 2 night. Bools stay valid: False == 0,
+    # True == 1.
+    variant = int(daylight)
+    if variant == 2:
+        return _night_environment(directions)
+    y = directions[..., 1]
+    azimuth = np.arctan2(directions[..., 0], directions[..., 2])
+    t = np.clip(y, 0, 1)[..., None] ** 0.55
+    is_day = variant == 1
+    horizon = np.array([0.88, 1.06, 1.24]) if is_day else np.array([1.35, 0.59, 0.26])
+    zenith = np.array([0.17, 0.39, 0.78]) if is_day else np.array([0.16, 0.23, 0.47])
     color = horizon * (1 - t) + zenith * t
     # Broad, soft cloud bands become light sources in rough surface reflections.
     cloud = np.sin(azimuth * 3.0 + y * 8.0) * np.sin(azimuth * 5.0 - y * 4.0)
     cloud = np.clip((cloud - 0.12) * 1.7, 0, 1) * np.clip(y * 6, 0, 1)
     cloud *= np.clip((0.85 - y) * 3, 0, 1)
-    cloud_color = np.array([1.7, 1.72, 1.65]) if daylight else np.array([1.8, 0.92, 0.48])
+    cloud_color = np.array([1.7, 1.72, 1.65]) if is_day else np.array([1.8, 0.92, 0.48])
     color = color * (1 - cloud[..., None] * 0.55) + cloud_color * cloud[..., None] * 0.55
     ridge = 0.028 + 0.018 * np.sin(azimuth * 5) + 0.01 * np.sin(azimuth * 13)
     hill = (y >= 0) & (y < ridge)
@@ -140,13 +186,13 @@ def bake_brdf_lut(size=32, count=128):
 @ti.data_oriented
 class EnvironmentLighting:
     def __init__(self):
-        self.environment = ti.Vector.field(3, ti.f32, shape=(2, 128, 64))
-        self.irradiance = ti.Vector.field(3, ti.f32, shape=(2, 32, 16))
-        self.prefiltered = ti.Vector.field(3, ti.f32, shape=(2, 5, 64, 32))
+        self.environment = ti.Vector.field(3, ti.f32, shape=(3, 128, 64))
+        self.irradiance = ti.Vector.field(3, ti.f32, shape=(3, 32, 16))
+        self.prefiltered = ti.Vector.field(3, ti.f32, shape=(3, 5, 64, 32))
         self.brdf_lut = ti.Vector.field(2, ti.f32, shape=(32, 32))
         sky, irradiance, specular = [], [], []
-        for daylight in (False, True):
-            sampler = lambda directions, day=daylight: procedural_environment(directions, day)
+        for variant in range(3):
+            sampler = lambda directions, v=variant: procedural_environment(directions, v)
             sky.append(sampler(direction_grid(128, 64)))
             irradiance.append(convolve_environment(direction_grid(32, 16), sampler=sampler))
             specular.append([convolve_environment(direction_grid(64, 32), roughness=level / 4,
@@ -167,12 +213,13 @@ class EnvironmentLighting:
         x, y = self.coordinates(direction, ti.static(image.shape[1]), ti.static(image.shape[2]))
         ix, iy = ti.cast(ti.floor(x), ti.i32), ti.cast(ti.floor(y), ti.i32)
         fx, fy = x - ti.floor(x), y - iy
+        index = ti.min(2, ti.max(0, ti.cast(ti.round(daylight), ti.i32)))
         result = ti.Vector([0.0, 0.0, 0.0])
         for a, b in ti.static(ti.ndrange(2, 2)):
             weight = (fx if a else 1 - fx) * (fy if b else 1 - fy)
             px = (ix + a + ti.static(image.shape[1])) % ti.static(image.shape[1])
             py = ti.min(iy + b, ti.static(image.shape[2]) - 1)
-            result += weight * (image[0, px, py] * (1 - daylight) + image[1, px, py] * daylight)
+            result += weight * image[index, px, py]
         return result
 
     @ti.func
@@ -183,11 +230,12 @@ class EnvironmentLighting:
         level = ti.max(0.0, ti.min(4.0, roughness * 4.0))
         low = ti.cast(ti.floor(level), ti.i32)
         fraction = level - low
+        index = ti.min(2, ti.max(0, ti.cast(ti.round(daylight), ti.i32)))
         result = ti.Vector([0.0, 0.0, 0.0])
         for a, b, c in ti.static(ti.ndrange(2, 2, 2)):
             weight = (fx if a else 1 - fx) * (fy if b else 1 - fy) * (fraction if c else 1 - fraction)
             px, py, mip = (ix + a + 64) % 64, ti.min(iy + b, 31), ti.min(low + c, 4)
-            result += weight * (self.prefiltered[0, mip, px, py] * (1 - daylight) + self.prefiltered[1, mip, px, py] * daylight)
+            result += weight * self.prefiltered[index, mip, px, py]
         return result
 
     @ti.func

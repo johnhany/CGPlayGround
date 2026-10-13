@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GPU 粒子系统 | Three.js 渲染示例</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+    canvas {
+      display: block;
+    }
+    #info {
+      position: fixed;
+      left: 16px;
+      bottom: 14px;
+      color: #7d92a8;
+      font: 12px/1.8 ui-monospace, Menlo, Consolas, monospace;
+      letter-spacing: 0.06em;
+      user-select: none;
+      pointer-events: none;
+    }
+    #info b {
+      color: #cfe3f5;
+      font-weight: 600;
+    }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="info">
+    <b>GPU 粒子系统</b> · Three.js GPGPU curl noise 流场<br>
+    拖动旋转 · 滚轮缩放 · 右键平移 · 指针吸引或排斥 · 空格暂停
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer.js';
+    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+    import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+    import GUI from 'three/addons/libs/lil-gui.module.min.js';
+    import Stats from 'three/addons/libs/stats.module.js';
+
+    // ---------------------------------------------------------------------------
+    // 参数
+    // ---------------------------------------------------------------------------
+
+    const params = {
+      粒子数量: 512,          // 模拟纹理每边尺寸，粒子总数为尺寸的平方
+      流场尺度: 0.022,        // curl noise 采样坐标缩放
+      流场强度: 22.0,         // 流场加速度幅值
+      流场演化: 0.18,         // 流场随时间漂移的速度
+      漩涡强度: 7.0,          // 绕竖直轴的切向加速度
+      扁平化: 0.5,            // 把粒子压向水平面的回复加速度
+      阻尼: 0.8,              // 速度指数衰减系数
+      最短寿命: 3.0,          // 粒子寿命下限，单位秒
+      最长寿命: 8.0,          // 粒子寿命上限，单位秒
+      指针模式: '关闭',       // 关闭 / 吸引 / 排斥
+      指针力度: 60.0,
+      点大小: 1.1,
+      亮度: 0.05,             // 单个粒子的高光强度
+      速度显色: 0.04,         // 速度到配色的映射比例
+      配色: '极光',
+      泛光强度: 0.55,
+      泛光半径: 0.7,
+      泛光阈值: 0.15,
+      自动旋转: true,
+      暂停: false
+    };
+
+    const PALETTES = {
+      极光: ['#051433', '#19d9a6', '#8fffce'],
+      熔岩: ['#260600', '#ff590d', '#ffd966'],
+      星云: ['#14052f', '#cc2690', '#ffbfe0'],
+      冰蓝: ['#030d26', '#1a73ff', '#ccf2ff']
+    };
+
+    const EMITTER_RADIUS = 55.0;     // 初始生成盘面半径
+    const EMITTER_THICKNESS = 8.0;   // 初始生成盘面厚度
+    const INIT_SPEED = 8.0;          // 初始切向速度
+    const BOUND = 260.0;             // 超出该半径视为逃逸并重生
+
+    // ---------------------------------------------------------------------------
+    // 渲染器、场景与相机
+    // ---------------------------------------------------------------------------
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    document.body.appendChild(renderer.domElement);
+
+    if (!renderer.getContext().getExtension('EXT_color_buffer_float')) {
+      console.warn('当前环境不支持浮点颜色缓冲，模拟精度将降级为半浮点');
+    }
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 2000);
+    camera.position.set(0, 95, 185);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.minDistance = 30;
+    controls.maxDistance = 600;
+    controls.maxPolarAngle = Math.PI - 0.05;
+    controls.autoRotate = params.自动旋转;
+    controls.autoRotateSpeed = 0.6;
+
+    const stats = new Stats();
+    document.body.appendChild(stats.dom);
+
+    // ---------------------------------------------------------------------------
+    // 计算着色器
+    // ---------------------------------------------------------------------------
+
+    // 三维单纯形噪声，Ashima Arts 实现
+    const NOISE_GLSL = /* glsl */`
+      vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+      vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+      vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
+      vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+      float snoise(vec3 v) {
+        const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
+        const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+        vec3 i = floor(v + dot(v, C.yyy));
+        vec3 x0 = v - i + dot(i, C.xxx);
+        vec3 g = step(x0.yzx, x0.xyz);
+        vec3 l = 1.0 - g;
+        vec3 i1 = min(g.xyz, l.zxy);
+        vec3 i2 = max(g.xyz, l.zxy);
+        vec3 x1 = x0 - i1 + C.xxx;
+        vec3 x2 = x0 - i2 + C.yyy;
+        vec3 x3 = x0 - D.yyy;
+        i = mod289(i);
+        vec4 p = permute(permute(permute(
+                  i.z + vec4(0.0, i1.z, i2.z, 1.0))
+                + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+                + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+        float n_ = 0.142857142857;
+        vec3 ns = n_ * D.wyz - D.xzx;
+        vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+        vec4 x_ = floor(j * ns.z);
+        vec4 y_ = floor(j - 7.0 * x_);
+        vec4 x = x_ * ns.x + ns.yyyy;
+        vec4 y = y_ * ns.x + ns.yyyy;
+        vec4 h = 1.0 - abs(x) - abs(y);
+        vec4 b0 = vec4(x.xy, y.xy);
+        vec4 b1 = vec4(x.zw, y.zw);
+        vec4 s0 = floor(b0) * 2.0 + 1.0;
+        vec4 s1 = floor(b1) * 2.0 + 1.0;
+        vec4 sh = -step(h, vec4(0.0));
+        vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+        vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+        vec3 p0 = vec3(a0.xy, h.x);
+        vec3 p1 = vec3(a0.zw, h.y);
+        vec3 p2 = vec3(a1.xy, h.z);
+        vec3 p3 = vec3(a1.zw, h.w);
+        vec4 norm = taylorInvSqrt(vec4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+        p0 *= norm.x;
+        p1 *= norm.y;
+        p2 *= norm.z;
+        p3 *= norm.w;
+        vec4 m = max(0.6 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+        m = m * m;
+        return 42.0 * dot(m * m, vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+      }
+
+      vec3 snoiseVec3(vec3 x) {
+        return vec3(
+          snoise(x),
+          snoise(x + vec3(123.4, 57.1, 89.2)),
+          snoise(x + vec3(-71.3, 214.5, -33.7))
+        );
+      }
+
+      // 对向量势场做中心差分得到无散度的旋涡场
+      vec3 curlNoise(vec3 p) {
+        const float e = 0.35;
+        vec3 dx = vec3(e, 0.0, 0.0);
+        vec3 dy = vec3(0.0, e, 0.0);
+        vec3 dz = vec3(0.0, 0.0, e);
+        vec3 x0 = snoiseVec3(p - dx);
+        vec3 x1 = snoiseVec3(p + dx);
+        vec3 y0 = snoiseVec3(p - dy);
+        vec3 y1 = snoiseVec3(p + dy);
+        vec3 z0 = snoiseVec3(p - dz);
+        vec3 z1 = snoiseVec3(p + dz);
+        vec3 c = vec3(
+          (y1.z - y0.z) - (z1.y - z0.y),
+          (z1.x - z0.x) - (x1.z - x0.z),
+          (x1.y - x0.y) - (y1.x - y0.x)
+        );
+        return normalize(c / (2.0 * e));
+      }
+
+      float hash12(vec2 p) {
+        vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+        p3 += dot(p3, p3.yzx + 33.33);
+        return fract((p3.x + p3.y) * p3.z);
+      }
+    `;
+
+    // 两个计算着色器共用的一致重生逻辑：位置着色器与速度着色器在同一帧
+    // 依据上一帧状态做相同判定，并用相同表达式生成新位置与新寿命
+    const COMMON_UNIFORMS_GLSL = /* glsl */`
+      uniform float uDelta;
+      uniform float uTime;
+      uniform float uLifeMin;
+      uniform float uLifeMax;
+      uniform float uBound;
+      uniform float uEmitterRadius;
+      uniform float uEmitterThickness;
+    `;
+
+    const RESPAWN_GLSL = /* glsl */`
+      vec3 spawnDisk(vec2 seed) {
+        float a = hash12(seed) * 6.2831853;
+        float r = uEmitterRadius * sqrt(hash12(seed + 17.17));
+        float y = (hash12(seed + 31.7) - 0.5) * uEmitterThickness;
+        return vec3(cos(a) * r, y, sin(a) * r);
+      }
+
+      bool checkRespawn(vec2 uv, vec3 pos, float life, out vec3 newPos, out float newLife) {
+        if (life <= 0.0 || length(pos) > uBound) {
+          float t = fract(uTime * 0.731);
+          float s = hash12(uv * 1024.0 + t * 371.0);
+          newLife = mix(uLifeMin, uLifeMax, s);
+          newPos = spawnDisk(uv * 91.7 + t * 13.1);
+          return true;
+        }
+        newPos = pos;
+        newLife = life;
+        return false;
+      }
+    `;
+
+    const velocityShader = /* glsl */`
+      ${COMMON_UNIFORMS_GLSL}
+      uniform float uFlowScale;
+      uniform float uFlowStrength;
+      uniform float uFlowSpeed;
+      uniform float uSwirl;
+      uniform float uFlatten;
+      uniform float uDamping;
+      uniform float uAttract;
+      uniform vec3 uAttractor;
+      uniform float uInitSpeed;
+
+      ${NOISE_GLSL}
+      ${RESPAWN_GLSL}
+
+      void main() {
+        vec2 uv = gl_FragCoord.xy / resolution.xy;
+        vec4 velData = texture2D(textureVelocity, uv);
+        vec4 posData = texture2D(texturePosition, uv);
+        vec3 pos = posData.xyz;
+        vec3 vel = velData.xyz;
+
+        vec3 newPos;
+        float newLife;
+        if (checkRespawn(uv, pos, posData.w, newPos, newLife)) {
+          // 新生粒子获得绕竖直轴的初始切向速度与少量扰动
+          vec3 tangent = normalize(vec3(-newPos.z, 0.0, newPos.x) + vec3(0.0001, 0.0, 0.0001));
+          float s = 0.35 + 0.65 * hash12(uv * 4096.0 + fract(uTime) * 71.7);
+          vel = tangent * uInitSpeed * s;
+          vel += (vec3(hash12(uv + 3.1), hash12(uv + 5.7), hash12(uv + 9.4)) - 0.5) * uInitSpeed * 0.4;
+          velData.w = newLife;
+        } else {
+          vec3 acc = vec3(0.0);
+
+          // curl noise 流场，采样点随时间漂移使流场持续演化
+          vec3 field = newPos * uFlowScale + vec3(0.0, uTime * uFlowSpeed, uTime * uFlowSpeed * 0.7);
+          acc += curlNoise(field) * uFlowStrength;
+
+          // 绕竖直轴的漩涡与压向水平面的回复力
+          vec3 tangent = normalize(vec3(-pos.z, 0.0, pos.x) + vec3(0.0001, 0.0, 0.0001));
+          acc += tangent * uSwirl;
+          acc.y -= pos.y * uFlatten;
+
+          // 指针位置的吸引或排斥力，随距离平方衰减
+          vec3 toAttractor = uAttractor - pos;
+          float d2 = dot(toAttractor, toAttractor);
+          acc += normalize(toAttractor + vec3(0.0001)) * (uAttract / (1.0 + d2 * 0.004));
+
+          vel += acc * uDelta;
+          vel *= exp(-uDamping * uDelta);
+        }
+
+        gl_FragColor = vec4(vel, velData.w);
+      }
+    `;
+
+    const positionShader = /* glsl */`
+      ${COMMON_UNIFORMS_GLSL}
+      ${NOISE_GLSL}
+      ${RESPAWN_GLSL}
+
+      void main() {
+        vec2 uv = gl_FragCoord.xy / resolution.xy;
+        vec4 posData = texture2D(texturePosition, uv);
+        vec4 velData = texture2D(textureVelocity, uv);
+        vec3 pos = posData.xyz;
+        float life = posData.w;
+
+        vec3 newPos;
+        float newLife;
+        if (checkRespawn(uv, pos, life, newPos, newLife)) {
+          pos = newPos;
+          life = newLife;
+        } else {
+          pos += velData.xyz * uDelta;
+          life -= uDelta;
+        }
+
+        gl_FragColor = vec4(pos, life);
+      }
+    `;
+
+    // ---------------------------------------------------------------------------
+    // 渲染着色器
+    // ---------------------------------------------------------------------------
+
+    const renderVertexShader = /* glsl */`
+      uniform sampler2D texturePosition;
+      uniform sampler2D textureVelocity;
+      uniform float uPointSize;
+      uniform float uScale;        // 像素尺度，用于透视缩放
+      uniform float uSpeedScale;
+      uniform vec3 uColorA;
+      uniform vec3 uColorB;
+      uniform vec3 uColorC;
+      varying vec3 vColor;
+      varying float vFade;
+
+      void main() {
+        vec4 posData = texture2D(texturePosition, uv);
+        vec4 velData = texture2D(textureVelocity, uv);
+        vec3 pos = posData.xyz;
+        float maxLife = max(velData.w, 0.001);
+        float ageT = 1.0 - clamp(posData.w / maxLife, 0.0, 1.0);   // 0 为新生，1 为消亡
+
+        vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        gl_PointSize = clamp(uPointSize * uScale / max(0.1, -mvPosition.z), 0.5, 64.0);
+
+        // 按速度在三段配色之间插值
+        float t = clamp(length(velData.xyz) * uSpeedScale, 0.0, 1.0);
+        vColor = t < 0.5
+          ? mix(uColorA, uColorB, t * 2.0)
+          : mix(uColorB, uColorC, t * 2.0 - 1.0);
+
+        vFade = smoothstep(0.0, 0.08, ageT) * (1.0 - smoothstep(0.75, 1.0, ageT));
+      }
+    `;
+
+    const renderFragmentShader = /* glsl */`
+      uniform float uIntensity;
+      varying vec3 vColor;
+      varying float vFade;
+
+      void main() {
+        float d = length(gl_PointCoord - 0.5) * 2.0;
+        if (d > 1.0) discard;
+        float a = exp(-d * d * 4.5);   // 高斯形光斑
+        gl_FragColor = vec4(vColor * vFade * a * uIntensity, 1.0);
+      }
+    `;
+
+    // ---------------------------------------------------------------------------
+    // GPGPU 模拟与粒子网格
+    // ---------------------------------------------------------------------------
+
+    let gpuCompute = null;
+    let posVar = null;
+    let velVar = null;
+    let points = null;
+    let simU = null;   // 计算着色器 uniform 集合
+
+    const renderUniforms = {
+      texturePosition: { value: null },
+      textureVelocity: { value: null },
+      uPointSize: { value: params.点大小 },
+      uScale: { value: 1.0 },
+      uSpeedScale: { value: params.速度显色 },
+      uIntensity: { value: params.亮度 },
+      uColorA: { value: new THREE.Color(PALETTES[params.配色][0]) },
+      uColorB: { value: new THREE.Color(PALETTES[params.配色][1]) },
+      uColorC: { value: new THREE.Color(PALETTES[params.配色][2]) }
+    };
+
+    const pointsMaterial = new THREE.ShaderMaterial({
+      uniforms: renderUniforms,
+      vertexShader: renderVertexShader,
+      fragmentShader: renderFragmentShader,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true
+    });
+
+    function fillTextures(posTexture, velTexture) {
+      const pos = posTexture.image.data;
+      const vel = velTexture.image.data;
+      for (let i = 0; i < pos.length; i += 4) {
+        const a = Math.random() * Math.PI * 2;
+        const r = EMITTER_RADIUS * Math.sqrt(Math.random());
+        const x = Math.cos(a) * r;
+        const z = Math.sin(a) * r;
+        const y = (Math.random() - 0.5) * EMITTER_THICKNESS;
+        const life = params.最短寿命 + Math.random() * (params.最长寿命 - params.最短寿命);
+
+        pos[i + 0] = x;
+        pos[i + 1] = y;
+        pos[i + 2] = z;
+        pos[i + 3] = life;
+
+        const tangentX = -z / Math.max(r, 0.001);
+        const tangentZ = x / Math.max(r, 0.001);
+        const speed = INIT_SPEED * (0.35 + 0.65 * Math.random());
+        vel[i + 0] = tangentX * speed + (Math.random() - 0.5) * INIT_SPEED * 0.4;
+        vel[i + 1] = (Math.random() - 0.5) * INIT_SPEED * 0.4;
+        vel[i + 2] = tangentZ * speed + (Math.random() - 0.5) * INIT_SPEED * 0.4;
+        vel[i + 3] = life;
+      }
+    }
+
+    function createSimulation(size) {
+      disposeSimulation();
+
+      gpuCompute = new GPUComputationRenderer(size, size, renderer);
+
+      const posTexture = gpuCompute.createTexture();
+      const velTexture = gpuCompute.createTexture();
+      fillTextures(posTexture, velTexture);
+
+      velVar = gpuCompute.addVariable('textureVelocity', velocityShader, velTexture);
+      posVar = gpuCompute.addVariable('texturePosition', positionShader, posTexture);
+      gpuCompute.setVariableDependencies(velVar, [posVar, velVar]);
+      gpuCompute.setVariableDependencies(posVar, [posVar, velVar]);
+
+      const shared = {
+        uDelta: { value: 0.0 },
+        uTime: { value: 0.0 },
+        uLifeMin: { value: params.最短寿命 },
+        uLifeMax: { value: params.最长寿命 },
+        uBound: { value: BOUND },
+        uEmitterRadius: { value: EMITTER_RADIUS },
+        uEmitterThickness: { value: EMITTER_THICKNESS }
+      };
+
+      const velUniforms = velVar.material.uniforms;
+      Object.assign(velUniforms, shared, {
+        uFlowScale: { value: params.流场尺度 },
+        uFlowStrength: { value: params.流场强度 },
+        uFlowSpeed: { value: params.流场演化 },
+        uSwirl: { value: params.漩涡强度 },
+        uFlatten: { value: params.扁平化 },
+        uDamping: { value: params.阻尼 },
+        uAttract: { value: pointerAttract() },
+        uAttractor: { value: attractor },
+        uInitSpeed: { value: INIT_SPEED }
+      });
+
+      const posUniforms = posVar.material.uniforms;
+      Object.assign(posUniforms, shared);
+
+      simU = { vel: velUniforms, pos: posUniforms };
+
+      const error = gpuCompute.init();
+      if (error !== null) {
+        console.error(error);
+      }
+
+      // 点网格：position 仅作占位，真实位置存于 GPGPU 纹理，uv 负责定位纹素
+      const count = size * size;
+      const positions = new Float32Array(count * 3);
+      const uvs = new Float32Array(count * 2);
+      for (let i = 0; i < count; i++) {
+        uvs[i * 2 + 0] = ((i % size) + 0.5) / size;
+        uvs[i * 2 + 1] = (Math.floor(i / size) + 0.5) / size;
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+
+      points = new THREE.Points(geometry, pointsMaterial);
+      points.frustumCulled = false;
+      scene.add(points);
+    }
+
+    function disposeSimulation() {
+      if (points !== null) {
+        scene.remove(points);
+        points.geometry.dispose();
+        points = null;
+      }
+      if (gpuCompute !== null) {
+        gpuCompute.dispose();
+        gpuCompute = null;
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // 后处理
+    // ---------------------------------------------------------------------------
+
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(window.innerWidth, window.innerHeight),
+      params.泛光强度, params.泛光半径, params.泛光阈值
+    );
+    composer.addPass(bloomPass);
+    composer.addPass(new OutputPass());
+
+    // ---------------------------------------------------------------------------
+    // 指针交互
+    // ---------------------------------------------------------------------------
+
+    const attractor = new THREE.Vector3(0, 0, 0);        // 传给计算着色器的位置，带平滑
+    const attractorTarget = new THREE.Vector3(0, 0, 0);  // 指针命中的目标位置
+    const raycaster = new THREE.Raycaster();
+    const pointerNDC = new THREE.Vector2();
+    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+
+    function pointerAttract() {
+      if (params.指针模式 === '吸引') return params.指针力度;
+      if (params.指针模式 === '排斥') return -params.指针力度;
+      return 0.0;
+    }
+
+    function applyPointerForce() {
+      if (simU !== null) {
+        simU.vel.uAttract.value = pointerAttract();
+      }
+    }
+
+    window.addEventListener('pointermove', (event) => {
+      pointerNDC.set(
+        (event.clientX / window.innerWidth) * 2 - 1,
+        -(event.clientY / window.innerHeight) * 2 + 1
+      );
+      raycaster.setFromCamera(pointerNDC, camera);
+      const hit = new THREE.Vector3();
+      if (raycaster.ray.intersectPlane(groundPlane, hit) !== null) {
+        attractorTarget.copy(hit);
+      }
+    });
+
+    window.addEventListener('keydown', (event) => {
+      if (event.code === 'Space') {
+        params.暂停 = !params.暂停;
+        pauseController.updateDisplay();
+      }
+    });
+
+    // ---------------------------------------------------------------------------
+    // 控制面板
+    // ---------------------------------------------------------------------------
+
+    const gui = new GUI({ title: 'GPU 粒子系统' });
+
+    gui.add(params, '粒子数量', {
+      '1.6 万 (128²)': 128,
+      '6.5 万 (256²)': 256,
+      '26 万 (512²)': 512,
+      '105 万 (1024²)': 1024
+    }).onChange(() => createSimulation(params.粒子数量));
+
+    gui.add(params, '配色', Object.keys(PALETTES)).onChange((name) => {
+      renderUniforms.uColorA.value.set(PALETTES[name][0]);
+      renderUniforms.uColorB.value.set(PALETTES[name][1]);
+      renderUniforms.uColorC.value.set(PALETTES[name][2]);
+    });
+
+    const flowFolder = gui.addFolder('流场');
+    flowFolder.add(params, '流场尺度', 0.005, 0.08, 0.001).onChange((v) => { simU.vel.uFlowScale.value = v; });
+    flowFolder.add(params, '流场强度', 0, 60, 0.5).onChange((v) => { simU.vel.uFlowStrength.value = v; });
+    flowFolder.add(params, '流场演化', 0, 1, 0.01).onChange((v) => { simU.vel.uFlowSpeed.value = v; });
+    flowFolder.add(params, '漩涡强度', -30, 30, 0.5).onChange((v) => { simU.vel.uSwirl.value = v; });
+    flowFolder.add(params, '扁平化', 0, 2, 0.01).onChange((v) => { simU.vel.uFlatten.value = v; });
+    flowFolder.add(params, '阻尼', 0, 3, 0.01).onChange((v) => { simU.vel.uDamping.value = v; });
+    flowFolder.add(params, '最短寿命', 0.5, 10, 0.1).onChange((v) => {
+      simU.vel.uLifeMin.value = v;
+      simU.pos.uLifeMin.value = v;
+    });
+    flowFolder.add(params, '最长寿命', 0.5, 15, 0.1).onChange((v) => {
+      simU.vel.uLifeMax.value = v;
+      simU.pos.uLifeMax.value = v;
+    });
+
+    const pointerFolder = gui.addFolder('指针');
+    pointerFolder.add(params, '指针模式', ['关闭', '吸引', '排斥']).onChange(applyPointerForce);
+    pointerFolder.add(params, '指针力度', 0, 200, 1).onChange(applyPointerForce);
+
+    const renderFolder = gui.addFolder('渲染');
+    renderFolder.add(params, '点大小', 0.2, 5, 0.05).onChange((v) => { renderUniforms.uPointSize.value = v; });
+    renderFolder.add(params, '亮度', 0.02, 2, 0.01).onChange((v) => { renderUniforms.uIntensity.value = v; });
+    renderFolder.add(params, '速度显色', 0.005, 0.2, 0.001).onChange((v) => { renderUniforms.uSpeedScale.value = v; });
+    renderFolder.add(params, '泛光强度', 0, 3, 0.01).onChange((v) => { bloomPass.strength = v; });
+    renderFolder.add(params, '泛光半径', 0, 1, 0.01).onChange((v) => { bloomPass.radius = v; });
+    renderFolder.add(params, '泛光阈值', 0, 1, 0.01).onChange((v) => { bloomPass.threshold = v; });
+
+    const sceneFolder = gui.addFolder('场景');
+    sceneFolder.add(params, '自动旋转').onChange((v) => { controls.autoRotate = v; });
+    const pauseController = sceneFolder.add(params, '暂停');
+
+    gui.add({ 重置: () => createSimulation(params.粒子数量) }, '重置');
+
+    // ---------------------------------------------------------------------------
+    // 视口尺寸
+    // ---------------------------------------------------------------------------
+
+    function updatePointScale() {
+      renderUniforms.uScale.value =
+        renderer.domElement.height * 0.5 / Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
+    }
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      composer.setSize(window.innerWidth, window.innerHeight);
+      updatePointScale();
+    });
+
+    // ---------------------------------------------------------------------------
+    // 主循环
+    // ---------------------------------------------------------------------------
+
+    createSimulation(params.粒子数量);
+    updatePointScale();
+    if (simU !== null) {
+      applyPointerForce();
+    }
+
+    let lastTime = performance.now();
+
+    renderer.setAnimationLoop(() => {
+      const now = performance.now();
+      let delta = (now - lastTime) / 1000;
+      lastTime = now;
+      delta = Math.min(delta, 1 / 30);   // 切换标签页回来时限制单步时长，避免模拟发散
+
+      if (!params.暂停 && simU !== null) {
+        simU.vel.uDelta.value = delta;
+        simU.pos.uDelta.value = delta;
+        simU.vel.uTime.value = now / 1000;
+        simU.pos.uTime.value = now / 1000;
+        gpuCompute.compute();
+        renderUniforms.texturePosition.value = gpuCompute.getCurrentRenderTarget(posVar).texture;
+        renderUniforms.textureVelocity.value = gpuCompute.getCurrentRenderTarget(velVar).texture;
+      }
+
+      attractor.lerp(attractorTarget, 0.15);
+      controls.update();
+      composer.render();
+      stats.update();
+    });
+  </script>
+</body>
+</html>
