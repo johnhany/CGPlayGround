@@ -1,12 +1,15 @@
 import * as THREE from 'three';
 
-// 两套着色器水面共用的 Gerstner 位移代码与波形 uniform 构造。
+// 各套着色器水面共用的 Gerstner 位移代码与波形 uniform 构造。
 // GLSL 片段约定调用方已声明 uTime、uWindScale、uWaves 三个 uniform，
 // 波形公式与 waves.js 完全一致，保证浮力采样贴合
 
 export const WAVE_UNIFORMS_GLSL = /* glsl */`
   uniform float uTime;
   uniform float uWindScale;
+  uniform float uSharp;     // 谐波锐化系数
+  uniform float uLean;      // 波峰前倾系数
+  uniform float uEnv;       // 主导浪波群包络
   uniform vec4 uWaves[5];   // xy 为波向，z 为波陡，w 为波长
 `;
 
@@ -21,32 +24,32 @@ export const GERSTNER_GLSL = /* glsl */`
       float k = 6.2831853 / w.w;
       float steep = w.z * uWindScale;
       float a = steep / k;
+      if (i == 0) { a *= uEnv; }
       float c = sqrt(9.8 / k);
       float f = k * (dot(dir, p) - c * uTime);
       float s = sin(f);
-      float co = cos(f);
-      disp += vec3(dir.x * a * co, a * s, dir.y * a * co);
-      tangent += vec3(
-        -dir.x * dir.x * steep * s,
-        dir.x * steep * co,
-        -dir.x * dir.y * steep * s
-      );
-      binormal += vec3(
-        -dir.x * dir.y * steep * s,
-        dir.y * steep * co,
-        -dir.y * dir.y * steep * s
-      );
+      float sh = s - uSharp * sin(2.0 * f) * 0.5;   // 锐化波形
+      float hz = cos(f) + uLean * sh;               // 水平位移含波峰前倾
+      disp += vec3(dir.x * a * hz, a * sh, dir.y * a * hz);
+      // 位移对 x 与 z 的偏导累加，兼容任意波形改造
+      float dsh = cos(f) - uSharp * cos(2.0 * f);
+      float dhz = -s + uLean * dsh;
+      tangent += dir.x * a * k * vec3(dir.x * dhz, dsh, dir.y * dhz);
+      binormal += dir.y * a * k * vec3(dir.x * dhz, dsh, dir.y * dhz);
     }
     outNormal = normalize(cross(binormal, tangent));
     return disp;
   }
 `;
 
-// 由波场构造波形 uniform，uWaves 需在 UniformsUtils.merge 之后单独挂载
+// 由波场构造波形 uniform，uWaves 与随时间变化的 uEnv 需在每帧更新
 export function buildWaveUniforms(waveField) {
   return {
     uTime: { value: 0.0 },
     uWindScale: { value: 1.0 },
+    uSharp: { value: waveField.sharp },
+    uLean: { value: waveField.lean },
+    uEnv: { value: 1.0 },
     uWaves: {
       value: waveField.waves.map(
         (w) => new THREE.Vector4(w.dx, w.dz, w.steepness, w.wavelength)

@@ -102,7 +102,7 @@ export function updateSun(lights, skyUniforms, elevationDeg, azimuthDeg) {
 
 // 低多边形积云：每朵云由若干压扁的二十面体拼成，沿风向缓慢漂移，超出边界后回绕。
 // 云体保留三套材质，方案 A 与 C 下换用卡通渐变着色，方案 D 用平滑着色；
-// 方案 E 下隐藏立体积云，改为木版画风格的贝扣云纹精灵
+// 方案 E 下隐藏立体积云，改为轻淡的水平纸色云带
 export function createClouds(scene) {
   const group = new THREE.Group();
 
@@ -159,7 +159,7 @@ export function createClouds(scene) {
     group.add(cluster);
   }
 
-  // 浮世绘云纹：canvas 绘制的贝扣形云带，顶缘圆弧、底缘平直、端头带涡卷，
+  // 浮世绘云纹：canvas 绘制低对比度的水平云带，
   // 以精灵方式始终面向相机
   const cloudTexture = createUkiyoeCloudTexture();
   const spriteGroup = new THREE.Group();
@@ -179,7 +179,7 @@ export function createClouds(scene) {
       rotation: def.rot
     }));
     sprite.position.set(...def.pos);
-    sprite.scale.set(def.scale[0], def.scale[1], 1);
+    sprite.scale.set(def.scale[0] * 0.65, def.scale[1] * 0.45, 1);
     sprites.push({ s: sprite, speed: 0.8 + Math.random() * 0.8 });
     spriteGroup.add(sprite);
   }
@@ -220,53 +220,24 @@ export function createClouds(scene) {
   return { group, update, setStyle };
 }
 
-// 贝扣云纹贴图：顶缘一排圆弧、底缘平直的云带，左端带一段涡卷，米色填充配深靛描边
+// 纸色云带：少量平缓贝塞尔曲线配淡墨线，保留天空留白。
 function createUkiyoeCloudTexture() {
   const canvas = document.createElement('canvas');
   canvas.width = 512;
   canvas.height = 192;
   const ctx = canvas.getContext('2d');
 
-  ctx.fillStyle = '#fdf8ea';
-  ctx.strokeStyle = '#22384e';
-  ctx.lineWidth = 5;
-  ctx.lineJoin = 'round';
-
+  ctx.fillStyle = '#f7efd9';
+  ctx.strokeStyle = '#b3aa8b';
+  ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(24, 156);
-  const bumps = 5;
-  for (let i = 0; i < bumps; i++) {
-    const cx = 96 + i * 84;
-    ctx.arc(cx, 118, 44, Math.PI, 0, false);
-  }
-  ctx.lineTo(488, 156);
-  ctx.lineTo(120, 156);
+  ctx.moveTo(18, 124);
+  ctx.bezierCurveTo(90, 114, 100, 87, 170, 95);
+  ctx.bezierCurveTo(205, 50, 260, 65, 280, 91);
+  ctx.bezierCurveTo(350, 80, 366, 113, 490, 122);
+  ctx.bezierCurveTo(380, 137, 115, 142, 18, 124);
   ctx.closePath();
   ctx.fill();
-  ctx.stroke();
-
-  // 云带内侧的淡赭色装饰线
-  ctx.strokeStyle = '#d9c9a0';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(60, 140);
-  ctx.lineTo(460, 140);
-  ctx.stroke();
-
-  // 端头涡卷：半径渐减的螺旋线
-  ctx.strokeStyle = '#22384e';
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  for (let a = 0; a <= Math.PI * 3.0; a += 0.08) {
-    const r = Math.max(2, 24 - a * 6.5);
-    const x = 60 + Math.cos(a + Math.PI) * r;
-    const y = 128 + Math.sin(a + Math.PI) * r * 0.82;
-    if (a === 0) {
-      ctx.moveTo(x, y);
-    } else {
-      ctx.lineTo(x, y);
-    }
-  }
   ctx.stroke();
 
   const tex = new THREE.CanvasTexture(canvas);
@@ -277,6 +248,7 @@ function createUkiyoeCloudTexture() {
 // 将风格配置应用到天空、雾、背景、光照与云
 export function applyEnvironmentStyle(name, targets) {
   const config = STYLE_CONFIG[name];
+  targets.skyMaterial.toneMapped = name !== 'E';
   targets.skyUniforms.uTopColor.value.setHex(config.skyTop);
   targets.skyUniforms.uHorizonColor.value.setHex(config.skyHorizon);
   targets.skyUniforms.uSunGlow.value = config.sunGlow;

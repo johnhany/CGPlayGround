@@ -1,5 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RenderPixelatedPass } from 'three/addons/postprocessing/RenderPixelatedPass.js';
 import GUI from 'three/addons/libs/lil-gui.module.min.js';
 import Stats from 'three/addons/libs/stats.module.js';
 import { WaveField } from './waves.js';
@@ -8,15 +12,23 @@ import { createGhibliWater } from './water_ghibli.js';
 import { createToonWater } from './water_toon.js';
 import { createRealisticWater } from './water_realistic.js';
 import { createUkiyoeWater } from './water_ukiyoe.js';
+import { FoamDecals } from './foam_decals.js';
+import { WaveClaws } from './wave_claws.js';
+import { createWatercolorPass } from './watercolor_pass.js';
 import { buildBoat, updateBoat } from './boat.js';
 import { createSky, createEnvironmentMap, createClouds, createLights, updateSun, applyEnvironmentStyle } from './environment.js';
 import { STYLE_CONFIG } from './styles.js';
 
+// 可复现的风格对比入口，例如 ?style=E&time=0&paused=1。
+const previewQuery = new URLSearchParams(window.location.search);
+const initialStyle = previewQuery.get('style');
+const initialTime = Number(previewQuery.get('time') || 0);
 const params = {
-  画面风格: 'A',
+  画面风格: Object.hasOwn(STYLE_CONFIG, initialStyle) ? initialStyle : 'A',
+  像素尺寸: 5,
   风浪强度: 1.0,
   波速: 1.0,
-  暂停: false,
+  暂停: previewQuery.get('paused') === '1',
   太阳高度角: 55,
   太阳方位角: 125,
   曝光: 1.12,
@@ -75,13 +87,22 @@ const waterFlat = createWater(waveField);
 const waterToon = createToonWater(waveField, STYLE_CONFIG.C.water);
 const waterRealistic = createRealisticWater(waveField, STYLE_CONFIG.D.water);
 const waterUkiyoe = createUkiyoeWater(waveField, STYLE_CONFIG.E.water);
-scene.add(waterGhibli.mesh, waterFlat.mesh, waterToon.mesh, waterRealistic.mesh, waterUkiyoe.mesh);
+// 模块版本错配时（浏览器缓存了旧配置文件）降级跳过，避免启动崩溃
+const waterWash = STYLE_CONFIG.F ? createGhibliWater(waveField, STYLE_CONFIG.F.water) : null;
+scene.add(
+  waterGhibli.mesh, waterFlat.mesh, waterToon.mesh,
+  waterRealistic.mesh, waterUkiyoe.mesh, ...(waterWash ? [waterWash.mesh] : [])
+);
 
 const boat = buildBoat();
 boat.heading = THREE.MathUtils.degToRad(params.船体朝向);
 scene.add(boat.group, boat.foamRing, boat.shadowBlob);
 
 const clouds = createClouds(scene);
+
+// 浮世绘风格的爪形浪花贴花与立体爪浪，仅在方案 E 下启用
+const foamDecals = new FoamDecals(scene);
+const waveClaws = new WaveClaws(scene, waveField);
 
 // 太阳方向同时驱动平行光、天穹与各着色器水面的高光
 let sunDir = new THREE.Vector3();
@@ -90,8 +111,26 @@ function refreshSun() {
   waterGhibli.uniforms.uSunDir.value.copy(sunDir);
   waterToon.uniforms.uSunDir.value.copy(sunDir);
   waterRealistic.uniforms.uSunDir.value.copy(sunDir);
+  if (waterWash) waterWash.uniforms.uSunDir.value.copy(sunDir);
 }
 refreshSun();
+
+// 后处理链：常规风格走 RenderPass 直出，方案 G 走像素化 pass，
+// 方案 F 叠加水彩 pass，最后经 OutputPass 做色调映射与编码
+const composer = new EffectComposer(renderer);
+const renderPass = new RenderPass(scene, camera);
+composer.addPass(renderPass);
+const pixelPass = new RenderPixelatedPass(params.像素尺寸, scene, camera, {
+  normalEdgeStrength: 0.4,
+  depthEdgeStrength: 0.4,
+  pixelAligned: true
+});
+pixelPass.enabled = false;
+composer.addPass(pixelPass);
+const washPass = createWatercolorPass();
+washPass.enabled = false;
+composer.addPass(washPass);
+composer.addPass(new OutputPass());
 
 // 以当前天穹生成 PMREM 环境贴图，供 PBR 船体做环境光照
 let envRenderTarget = null;
@@ -110,21 +149,72 @@ refreshEnvironmentMap();
 
 const styleButtons = document.querySelectorAll('#style-switch button');
 let styleController = null;
+let savedView = null;
+let activeStyle = null;
 
 function setStyle(name) {
+  // E 的默认构图单独保存，退出时恢复原机位及用户的环绕设置。
+  if (name === 'E' && activeStyle !== 'E') {
+    savedView = { position: camera.position.clone(), target: controls.target.clone(),
+      fov: camera.fov, autoRotate: params.自动环绕, heading: params.船体朝向, guiClosed: gui._closed };
+    gui.close();
+    camera.position.set(19, 10, 23);
+    camera.fov = 42;
+    controls.target.set(-9, 1.8, 0);
+    params.船体朝向 = -20;
+    boat.heading = THREE.MathUtils.degToRad(params.船体朝向);
+    params.自动环绕 = false;
+    controls.autoRotate = false;
+    camera.updateProjectionMatrix();
+  } else if (name !== 'E' && activeStyle === 'E' && savedView) {
+    camera.position.copy(savedView.position);
+    controls.target.copy(savedView.target);
+    camera.fov = savedView.fov;
+    params.自动环绕 = savedView.autoRotate;
+    params.船体朝向 = savedView.heading;
+    boat.heading = THREE.MathUtils.degToRad(params.船体朝向);
+    controls.autoRotate = params.自动环绕;
+    camera.updateProjectionMatrix();
+    if (savedView.guiClosed) gui.close();
+    else gui.open();
+    savedView = null;
+  }
+  activeStyle = name;
   params.画面风格 = name;
-  waveField.amplitudeScale = STYLE_CONFIG[name].waveScale;
+  waveField.amplitudeScale = (STYLE_CONFIG[name] || STYLE_CONFIG.A).waveScale;
 
-  waterGhibli.mesh.visible = name === 'A';
+  waterGhibli.mesh.visible = name === 'A' || name === 'G';
   waterFlat.mesh.visible = name === 'B';
   waterToon.mesh.visible = name === 'C';
   waterRealistic.mesh.visible = name === 'D';
   waterUkiyoe.mesh.visible = name === 'E';
+  if (waterWash !== null) {
+    waterWash.mesh.visible = name === 'F';
+  }
   waterFlat.material.wireframe = params.水面线框 && name === 'B';
 
   boat.applyStyle(name);
-  applyEnvironmentStyle(name, { scene, lights, skyUniforms, clouds });
+  applyEnvironmentStyle(name, { scene, lights, skyUniforms, skyMaterial: sky.material, clouds });
   refreshEnvironmentMap();
+
+  foamDecals.group.visible = name === 'E';
+  waveClaws.group.visible = name === 'E';
+  // 切换发生在暂停状态时，也立即更新波形与浮力，避免保留上一风格的振幅。
+  waterGhibli.update();
+  waterFlat.update();
+  waterToon.update();
+  waterRealistic.update();
+  waterUkiyoe.update();
+  if (waterWash) waterWash.update();
+  if (name === 'E') {
+    foamDecals.reset(waveField, camera.position);
+    waveClaws.update(0, waveField);
+  }
+  updateBoat(boat, waveField, 1);
+
+  renderPass.enabled = name !== 'G';
+  pixelPass.enabled = name === 'G';
+  washPass.enabled = name === 'F';
 
   for (const btn of styleButtons) {
     btn.classList.toggle('active', btn.dataset.style === name);
@@ -148,6 +238,10 @@ window.addEventListener('keydown', (event) => {
     setStyle('D');
   } else if (event.code === 'Digit5') {
     setStyle('E');
+  } else if (event.code === 'Digit6') {
+    setStyle('F');
+  } else if (event.code === 'Digit7') {
+    setStyle('G');
   }
 });
 
@@ -163,11 +257,13 @@ styleController = styleFolder.add(params, '画面风格', {
   '方案 B · 低多边形海面': 'B',
   '方案 C · 风之杖卡通海': 'C',
   '方案 D · 半写实明亮海': 'D',
-  '方案 E · 浮世绘海浪': 'E'
+  '方案 E · 浮世绘海浪': 'E',
+  '方案 F · 水彩纸本': 'F',
+  '方案 G · 像素艺术': 'G'
 }).onChange(setStyle);
 
 const seaFolder = gui.addFolder('海面');
-seaFolder.add(params, '风浪强度', 0.2, 2.0, 0.05).onChange((v) => { waveField.windScale = v; });
+seaFolder.add(params, '风浪强度', 0.2, 2.0, 0.05).onChange((v) => { waveField.windScale = v; setStyle(params.画面风格); });
 seaFolder.add(params, '波速', 0.2, 2.0, 0.05).onChange((v) => { waveField.speedScale = v; });
 seaFolder.add(params, '暂停');
 
@@ -177,8 +273,9 @@ lightFolder.add(params, '太阳方位角', 0, 360, 1).onChange(refreshSun);
 lightFolder.add(params, '曝光', 0.6, 1.6, 0.01).onChange((v) => { renderer.toneMappingExposure = v; });
 
 const sceneFolder = gui.addFolder('场景');
-sceneFolder.add(params, '船体朝向', 0, 360, 1).onChange((v) => { boat.heading = THREE.MathUtils.degToRad(v); });
-sceneFolder.add(params, '自动环绕').onChange((v) => { controls.autoRotate = v; });
+sceneFolder.add(params, '像素尺寸', 2, 12, 1).onChange((v) => { pixelPass.setPixelSize(v); });
+sceneFolder.add(params, '船体朝向', -180, 360, 1).listen().onChange((v) => { boat.heading = THREE.MathUtils.degToRad(v); });
+sceneFolder.add(params, '自动环绕').listen().onChange((v) => { controls.autoRotate = v; });
 sceneFolder.add(params, '水面线框').onChange((v) => { waterFlat.material.wireframe = v; });
 
 // ---------------------------------------------------------------------------
@@ -189,11 +286,18 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  washPass.uniforms.uResolution.value.set(
+    window.innerWidth * 2.0,
+    window.innerHeight * 2.0
+  );
 });
 
-setStyle(params.画面风格);
-
 let lastTime = performance.now();
+let waveTimeRaw = Number.isFinite(initialTime) && initialTime >= 0 ? initialTime : 0.0;   // 波面连续时钟，方案 G 下量化后写入波场
+
+waveField.time = waveTimeRaw;
+setStyle(params.画面风格);
 
 renderer.setAnimationLoop(() => {
   const now = performance.now();
@@ -202,8 +306,12 @@ renderer.setAnimationLoop(() => {
   delta = Math.min(delta, 1 / 30);
 
   if (!params.暂停) {
-    waveField.time += delta * waveField.speedScale;
-    if (params.画面风格 === 'A') {
+    // 方案 G 下波面时钟按每秒十二帧量化，波浪与船体一起步进，强化复古感
+    waveTimeRaw += delta * waveField.speedScale * (params.画面风格 === 'E' ? 0.32 : 1.0);
+    waveField.time = params.画面风格 === 'G'
+      ? Math.floor(waveTimeRaw * 12.0) / 12.0
+      : waveTimeRaw;
+    if (params.画面风格 === 'A' || params.画面风格 === 'G') {
       waterGhibli.update();
     } else if (params.画面风格 === 'C') {
       waterToon.update();
@@ -211,6 +319,10 @@ renderer.setAnimationLoop(() => {
       waterRealistic.update();
     } else if (params.画面风格 === 'E') {
       waterUkiyoe.update();
+      foamDecals.update(delta, waveField, camera.position);
+      waveClaws.update(delta, waveField, camera.position);
+    } else if (params.画面风格 === 'F' && waterWash !== null) {
+      waterWash.update();
     } else {
       waterFlat.update();
     }
@@ -219,7 +331,12 @@ renderer.setAnimationLoop(() => {
     waterToon.uniforms.uBoatPos.value.set(boat.group.position.x, boat.group.position.z);
   }
 
+  washPass.uniforms.uTime.value = waveField.time;
   controls.update();
-  renderer.render(scene, camera);
+  if (params.画面风格 === 'F' || params.画面风格 === 'G') {
+    composer.render();
+  } else {
+    renderer.render(scene, camera);
+  }
   stats.update();
 });

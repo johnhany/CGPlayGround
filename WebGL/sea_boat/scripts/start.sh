@@ -15,8 +15,8 @@ else
   echo "      端口空闲"
 fi
 
-echo "[2/3] 以 $DIR 为根启动静态服务器"
+echo "[2/3] 以 $DIR 为根启动静态服务器（禁缓存头，避免开发期模块缓存）"
 echo "[3/3] 访问 http://127.0.0.1:$PORT"
 
 cd "$DIR"
-exec python3 -m http.server "$PORT"
+exec python3 "$DIR/scripts/serve.py" "$PORT"

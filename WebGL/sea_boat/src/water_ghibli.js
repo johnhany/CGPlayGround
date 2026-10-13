@@ -105,6 +105,7 @@ export function createGhibliWater(waveField, waterConfig) {
   function update() {
     uniforms.uTime.value = waveField.time;
     uniforms.uWindScale.value = waveField.windScale * waveField.amplitudeScale;
+    uniforms.uEnv.value = waveField.envelope;
   }
 
   return { mesh, uniforms, update };

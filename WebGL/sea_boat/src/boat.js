@@ -67,14 +67,27 @@ const D_COLORS = {
 // 方案 E 浮世绘配色：木色剪影与米色纸帆，旗为套印的一点朱红
 const E_COLORS = {
   bottom: 0x2e2013,
-  hull: 0x54381f,
-  deck: 0x6e4c2a,
-  wood: 0x4a3018,
+  hull: 0xb58a54,
+  deck: 0xc6a16c,
+  wood: 0x86603c,
   sail: 0xf0e6cc,
   jib: 0xe8dcc0,
   flag: 0xb03a28,
-  roof: 0x3f2c1a,
+  roof: 0x936744,
   glass: 0x24303a
+};
+
+// 方案 F 水彩配色：柔和低饱和的水洗色调
+const F_COLORS = {
+  bottom: 0x6a4a34,
+  hull: 0x8a6a4a,
+  deck: 0xb59a6e,
+  wood: 0x7a5a3e,
+  sail: 0xf2ead6,
+  jib: 0xeadfc6,
+  flag: 0xc2726a,
+  roof: 0x9a6a4e,
+  glass: 0x5a7a8a
 };
 
 const WATERLINE = -0.12;         // 船壳分色判据
@@ -181,21 +194,21 @@ export function buildBoat() {
   hullGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
   hullGeo.computeVertexNormals();
 
-  // 五套配色下的船壳顶点色，切换风格时整体替换 color 属性
+  // 六套配色下的船壳顶点色，切换风格时整体替换 color 属性
   const gradientMap = getGradientMap();
-  const paletteOf = { A: A_COLORS, B: B_COLORS, C: C_COLORS, D: D_COLORS, E: E_COLORS };
+  const paletteOf = { A: A_COLORS, B: B_COLORS, C: C_COLORS, D: D_COLORS, E: E_COLORS, F: F_COLORS };
   const hullColorAttrs = {};
-  for (const key of ['A', 'B', 'C', 'D', 'E']) {
+  for (const key of ['A', 'B', 'C', 'D', 'E', 'F']) {
     const data = new Float32Array(colors);
     if (key === 'D') {
       recolorHullWet(
-        data,
+        data, positions,
         new THREE.Color(paletteOf[key].bottom),
         new THREE.Color(paletteOf[key].hull)
       );
     } else {
       recolorHull(
-        data,
+        data, positions,
         new THREE.Color(paletteOf[key].bottom),
         new THREE.Color(paletteOf[key].hull)
       );
@@ -225,6 +238,24 @@ export function buildBoat() {
     side: THREE.DoubleSide
   });
 
+  // 固定绘画方向的两档颜料，不受太阳角度、曝光或环境反射改变。
+  function printMaterial(hex, vertexColors = false) {
+    const mat = new THREE.MeshBasicMaterial({
+      color: hex, vertexColors: vertexColors === true, side: THREE.DoubleSide, toneMapped: false
+    });
+    mat.onBeforeCompile = shader => {
+      shader.vertexShader = 'varying float vPrintShade;\n' + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>',
+        '#include <begin_vertex>\nvPrintShade = dot(normalize(normal), normalize(vec3(-0.4, 1.0, 0.6)));');
+      shader.fragmentShader = 'varying float vPrintShade;\n' + shader.fragmentShader;
+      shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>',
+        '#include <color_fragment>\ndiffuseColor.rgb *= mix(0.72, 1.0, step(0.15, vPrintShade));');
+    };
+    mat.customProgramCacheKey = () => 'ukiyoe-two-ink-v1';
+    return mat;
+  }
+  const hullMatPrint = printMaterial(0xffffff, true);
+
   const hull = new THREE.Mesh(hullGeo, hullMatB);
   hull.castShadow = true;
   group.add(hull);
@@ -232,9 +263,9 @@ export function buildBoat() {
     mesh: hull,
     solid: true,
     apply(style) {
-      hull.geometry.setAttribute('color', hullColorAttrs[style]);
+      hull.geometry.setAttribute('color', hullColorAttrs[style] || hullColorAttrs.A);
       hull.material = style === 'B' ? hullMatB
-        : (style === 'D' ? hullMatD : hullMatToon);
+        : (style === 'D' ? hullMatD : (style === 'E' ? hullMatPrint : hullMatToon));
     }
   });
 
@@ -285,28 +316,32 @@ export function buildBoat() {
     A: plainToon(A_COLORS.hull),
     C: plainToon(C_COLORS.hull),
     D: plainD(D_COLORS.hull, { map: woodTexture }),
-    E: plainToon(E_COLORS.hull)
+    E: printMaterial(E_COLORS.hull),
+    F: plainToon(F_COLORS.hull)
   };
   const roofMats = {
     B: plainB(B_COLORS.roof),
     A: plainToon(A_COLORS.roof),
     C: plainToon(C_COLORS.roof),
     D: plainD(D_COLORS.roof, { roughness: 0.5 }),
-    E: plainToon(E_COLORS.roof)
+    E: printMaterial(E_COLORS.roof),
+    F: plainToon(F_COLORS.roof)
   };
   const glassMats = {
     B: plainB(B_COLORS.glass),
     A: plainToon(A_COLORS.glass),
     C: plainToon(C_COLORS.glass),
     D: plainD(D_COLORS.glass, { roughness: 0.12, metalness: 0.1, envIntensity: 1.3 }),
-    E: plainToon(E_COLORS.glass)
+    E: printMaterial(E_COLORS.glass),
+    F: plainToon(F_COLORS.glass)
   };
   const woodMats = {
     B: plainB(B_COLORS.wood),
     A: plainToon(A_COLORS.wood),
     C: plainToon(C_COLORS.wood),
     D: plainD(D_COLORS.wood, { map: woodTexture, roughness: 0.45 }),
-    E: plainToon(E_COLORS.wood)
+    E: printMaterial(E_COLORS.wood),
+    F: plainToon(F_COLORS.wood)
   };
 
   addBox(0.95, 0.5, 1.1, 0, 0.71, -0.55, cabinMats);              // 船舱
@@ -341,21 +376,25 @@ export function buildBoat() {
     A: plainToon(A_COLORS.sail, { side: THREE.DoubleSide }),
     C: plainToon(C_COLORS.sail, { side: THREE.DoubleSide }),
     D: plainD(D_COLORS.sail, { side: THREE.DoubleSide, roughness: 0.85, envIntensity: 0.3 }),
-    E: plainToon(E_COLORS.sail, { side: THREE.DoubleSide })
+    E: printMaterial(E_COLORS.sail),
+    F: plainToon(F_COLORS.sail, { side: THREE.DoubleSide })
   };
   const jibMats = {
     B: plainB(B_COLORS.jib, { side: THREE.DoubleSide, roughness: 0.9 }),
     A: plainToon(A_COLORS.jib, { side: THREE.DoubleSide }),
     C: plainToon(C_COLORS.jib, { side: THREE.DoubleSide }),
     D: plainD(D_COLORS.jib, { side: THREE.DoubleSide, roughness: 0.85, envIntensity: 0.3 }),
-    E: plainToon(E_COLORS.jib, { side: THREE.DoubleSide })
+    E: printMaterial(E_COLORS.jib),
+    F: plainToon(F_COLORS.jib, { side: THREE.DoubleSide })
   };
   const flagMats = {
     B: plainB(B_COLORS.flag, { side: THREE.DoubleSide }),
     A: plainToon(A_COLORS.flag, { side: THREE.DoubleSide }),
     C: plainToon(C_COLORS.flag, { side: THREE.DoubleSide }),
     D: plainD(D_COLORS.flag, { side: THREE.DoubleSide, roughness: 0.7 }),
-    E: plainToon(E_COLORS.flag, { side: THREE.DoubleSide })
+    E: printMaterial(E_COLORS.flag),
+    F: plainToon(F_COLORS.flag, { side: THREE.DoubleSide }),
+    G: plainToon(A_COLORS.flag, { side: THREE.DoubleSide })
   };
 
   addTriangleMesh(
@@ -383,7 +422,7 @@ export function buildBoat() {
   styleEntries.push({
     mesh: flag,
     solid: false,
-    apply(style) { flag.material = flagMats[style]; }
+    apply(style) { flag.material = flagMats[style] || flagMats.A; }
   });
 
   // ---- 方案 C 倒置外壳描边 ----
@@ -461,10 +500,12 @@ export function buildBoat() {
       for (const entry of styleEntries) {
         entry.apply(style);
       }
+      outlineMaterial.toneMapped = style !== 'E';
+      outlineMaterial.uniforms.uWidth.value = style === 'E' ? 0.025 : OUTLINE_WIDTH;
       for (const shell of outlineMeshes) {
         shell.visible = style === 'C' || style === 'E';
       }
-      foamRing.visible = style === 'A';
+      foamRing.visible = style === 'A' || style === 'F' || style === 'G';
       shadowBlob.visible = style === 'D';
     },
     // 将天穹生成的 PMREM 环境贴图赋给全部 PBR 标准材质
@@ -477,9 +518,9 @@ export function buildBoat() {
   };
 }
 
-function recolorHull(colors, bottomColor, hullColor) {
+function recolorHull(colors, vertexPositions, bottomColor, hullColor) {
   for (let i = 0; i < colors.length; i += 9) {
-    const y = (colors[i + 1] + colors[i + 4] + colors[i + 7]) / 3.0;
+    const y = (vertexPositions[i + 1] + vertexPositions[i + 4] + vertexPositions[i + 7]) / 3.0;
     const col = y < WATERLINE ? bottomColor : hullColor;
     for (let k = 0; k < 3; k++) {
       colors[i + k * 3] = col.r;
@@ -490,18 +531,17 @@ function recolorHull(colors, bottomColor, hullColor) {
 }
 
 // 方案 D 的船壳配色：在两色分界之上叠加水线附近的湿润暗带
-function recolorHullWet(colors, bottomColor, hullColor) {
+function recolorHullWet(colors, vertexPositions, bottomColor, hullColor) {
   const wet = new THREE.Color();
   for (let i = 0; i < colors.length; i += 9) {
-    const y = (colors[i + 1] + colors[i + 4] + colors[i + 7]) / 3.0;
+    const y = (vertexPositions[i + 1] + vertexPositions[i + 4] + vertexPositions[i + 7]) / 3.0;
     const col = y < WATERLINE ? bottomColor : hullColor;
     const band = smoothstep(-0.04, 0.05, y) * (1.0 - smoothstep(0.05, 0.24, y));
-    wet.copy(col).multiplyScalar(0.58);
-    col.lerp(wet, band);
+    wet.copy(col).multiplyScalar(1.0 - 0.42 * band);
     for (let k = 0; k < 3; k++) {
-      colors[i + k * 3] = col.r;
-      colors[i + k * 3 + 1] = col.g;
-      colors[i + k * 3 + 2] = col.b;
+      colors[i + k * 3] = wet.r;
+      colors[i + k * 3 + 1] = wet.g;
+      colors[i + k * 3 + 2] = wet.b;
     }
   }
 }

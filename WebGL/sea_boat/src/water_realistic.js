@@ -120,9 +120,9 @@ export function createRealisticWater(waveField, waterConfig) {
         float f1 = fbm(p * 0.32 + vec2(t * 0.14, t * 0.09));
         float f2 = fbm(p * 0.5 + vec2(-t * 0.11, t * 0.15) + 7.3);
         float field = mix(f1, f2, 0.5);
-        float crestF = smoothstep(0.38, 0.60, vHeight);
-        float foam = smoothstep(0.74 - crestF * 0.30, 0.84 - crestF * 0.30, field);
-        float trail = smoothstep(0.63, 0.72, field) * smoothstep(0.18, 0.34, vHeight);
+        float crestF = smoothstep(0.42, 0.62, vHeight);
+        float foam = smoothstep(0.78 - crestF * 0.30, 0.88 - crestF * 0.30, field);
+        float trail = smoothstep(0.68, 0.76, field) * smoothstep(0.18, 0.34, vHeight);
         foam = clamp(foam + trail * 0.45, 0.0, 1.0);
         col = mix(col, uFoamColor, foam * 0.92);
 
@@ -139,6 +139,7 @@ export function createRealisticWater(waveField, waterConfig) {
   function update() {
     uniforms.uTime.value = waveField.time;
     uniforms.uWindScale.value = waveField.windScale * waveField.amplitudeScale;
+    uniforms.uEnv.value = waveField.envelope;
   }
 
   return { mesh, uniforms, update };

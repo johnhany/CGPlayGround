@@ -15,8 +15,8 @@ if ($conns) {
   Write-Host "      端口空闲"
 }
 
-Write-Host "[2/3] 以 $Dir 为根启动静态服务器"
+Write-Host "[2/3] 以 $Dir 为根启动静态服务器（禁缓存头，避免开发期模块缓存）"
 Write-Host "[3/3] 访问 http://127.0.0.1:$Port"
 
 Set-Location $Dir
-python -m http.server $Port
+python "$Dir\scripts\serve.py" $Port

@@ -84,13 +84,43 @@ export const STYLE_CONFIG = {
     waveScale: 0.8,
     water: {
       c0: 0x0b2440,
-      c1: 0x114567,
-      c2: 0x2a6b8f,
-      c3: 0x5495ad,
+      c1: 0x234d69,
+      c2: 0x397b99,
+      c3: 0x83b2be,
       c4: 0xa8c4c9,
       foam: 0xf5efdf,
       ink: 0x16334a
     }
+  },
+  F: {
+    label: '水彩纸本',
+    skyTop: 0x9cc4d8,
+    skyHorizon: 0xf3ede0,
+    sunGlow: 0.6,
+    fog: 0xf3ede0,
+    sunIntensity: 1.5,
+    hemiIntensity: 1.0,
+    cloudScale: 1.0,
+    waveScale: 0.7,
+    water: {
+      deep: 0x4a7fa8,
+      mid: 0x7fb3cc,
+      crest: 0xb8d8de,
+      foam: 0xf6f3ea,
+      sky: 0x9cc4d8,
+      sun: 0xfff6e2
+    }
+  },
+  G: {
+    label: '像素艺术',
+    skyTop: 0x3f8fd0,
+    skyHorizon: 0xd4eef8,
+    sunGlow: 1.0,
+    fog: 0xd4eef8,
+    sunIntensity: 1.8,
+    hemiIntensity: 0.9,
+    cloudScale: 1.0,
+    waveScale: 1.0
   }
 };
 
