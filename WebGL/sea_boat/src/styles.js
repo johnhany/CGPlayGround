@@ -141,6 +141,24 @@ export const STYLE_CONFIG = {
       horizon: 0xe8ded0,
       sun: 0xfff2da
     }
+  },
+  I: {
+    label: '水墨留白',
+    skyTop: 0xf0e9d8,
+    skyHorizon: 0xf4efe0,
+    sunGlow: 0.0,
+    fog: 0xf4efe0,
+    sunIntensity: 1.0,
+    hemiIntensity: 0.9,
+    hemiSky: 0xf6f1e4,
+    hemiGround: 0xd8cdb8,
+    cloudScale: 1.0,
+    waveScale: 0.75,
+    water: {
+      paper: 0xf4efe0,
+      inkDeep: 0x1c2a30,
+      inkMid: 0x5a6a70
+    }
   }
 };
 

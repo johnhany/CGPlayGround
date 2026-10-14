@@ -107,6 +107,19 @@ const H_COLORS = {
   glass: 0x4a6a7a
 };
 
+// 方案 I 水墨配色：船为近黑墨色剪影，帆为纸白，旗为一点朱砂
+const I_COLORS = {
+  bottom: 0x141414,
+  hull: 0x232323,
+  deck: 0x2e2e2e,
+  wood: 0x1a1a1a,
+  sail: 0xf6f1e4,
+  jib: 0xefe9da,
+  flag: 0x9e3a2a,
+  roof: 0x202020,
+  glass: 0x3a3a3a
+};
+
 const WATERLINE = -0.12;         // 船壳分色判据
 const FLOAT_FORE = 1.7;          // 浮心采样点：船前距离
 const FLOAT_AFT = 1.6;           // 船后距离
@@ -217,14 +230,14 @@ export function buildBoat() {
   hullGeo.setAttribute('uv', new THREE.Float32BufferAttribute(hullUvs, 2));
   hullGeo.computeVertexNormals();
 
-  // 七套配色下的船壳顶点色，切换风格时整体替换 color 属性
+  // 八套配色下的船壳顶点色，切换风格时整体替换 color 属性
   const gradientMap = getGradientMap();
   const paletteOf = {
-    A: A_COLORS, B: B_COLORS, C: C_COLORS,
-    D: D_COLORS, E: E_COLORS, F: F_COLORS, H: H_COLORS
+    A: A_COLORS, B: B_COLORS, C: C_COLORS, D: D_COLORS,
+    E: E_COLORS, F: F_COLORS, H: H_COLORS, I: I_COLORS
   };
   const hullColorAttrs = {};
-  for (const key of ['A', 'B', 'C', 'D', 'E', 'F', 'H']) {
+  for (const key of ['A', 'B', 'C', 'D', 'E', 'F', 'H', 'I']) {
     const data = new Float32Array(colors);
     if (key === 'D') {
       recolorHullWet(
@@ -328,7 +341,7 @@ export function buildBoat() {
       if (style !== 'H') hull.geometry.setAttribute('color', hullColorAttrs[style] || hullColorAttrs.A);
       hull.material = style === 'B' ? hullMatB
         : (style === 'D' ? hullMatD
-          : (style === 'E' ? hullMatPrint
+          : (style === 'E' || style === 'I' ? hullMatPrint
             : (style === 'H' ? hullMatClay : hullMatToon)));
     }
   });
@@ -416,7 +429,8 @@ export function buildBoat() {
     D: plainD(D_COLORS.hull, { map: woodTexture }),
     E: printMaterial(E_COLORS.hull),
     F: plainToon(F_COLORS.hull),
-    H: plainClay(H_COLORS.hull)
+    H: plainClay(H_COLORS.hull),
+    I: printMaterial(I_COLORS.hull)
   };
   const roofMats = {
     B: plainB(B_COLORS.roof),
@@ -425,7 +439,8 @@ export function buildBoat() {
     D: plainD(D_COLORS.roof, { roughness: 0.5 }),
     E: printMaterial(E_COLORS.roof),
     F: plainToon(F_COLORS.roof),
-    H: plainClay(H_COLORS.roof)
+    H: plainClay(H_COLORS.roof),
+    I: printMaterial(I_COLORS.roof)
   };
   const glassMats = {
     B: plainB(B_COLORS.glass),
@@ -434,7 +449,8 @@ export function buildBoat() {
     D: plainD(D_COLORS.glass, { roughness: 0.12, metalness: 0.1, envIntensity: 1.3 }),
     E: printMaterial(E_COLORS.glass),
     F: plainToon(F_COLORS.glass),
-    H: plainClay(H_COLORS.glass, { roughness: 0.75, depth: 0.008 })
+    H: plainClay(H_COLORS.glass, { roughness: 0.75, depth: 0.008 }),
+    I: printMaterial(I_COLORS.glass)
   };
   const woodMats = {
     B: plainB(B_COLORS.wood),
@@ -443,7 +459,8 @@ export function buildBoat() {
     D: plainD(D_COLORS.wood, { map: woodTexture, roughness: 0.45 }),
     E: printMaterial(E_COLORS.wood),
     F: plainToon(F_COLORS.wood),
-    H: plainClay(H_COLORS.wood, { roughness: 0.85 })
+    H: plainClay(H_COLORS.wood, { roughness: 0.85 }),
+    I: printMaterial(I_COLORS.wood)
   };
 
   addBox(0.95, 0.5, 1.1, 0, 0.71, -0.55, cabinMats,
@@ -519,7 +536,8 @@ export function buildBoat() {
     D: plainD(D_COLORS.sail, { side: THREE.DoubleSide, roughness: 0.85, envIntensity: 0.3 }),
     E: printMaterial(E_COLORS.sail),
     F: plainToon(F_COLORS.sail, { side: THREE.DoubleSide }),
-    H: plainClay(H_COLORS.sail, { side: THREE.DoubleSide, roughness: 0.74 })
+    H: plainClay(H_COLORS.sail, { side: THREE.DoubleSide, roughness: 0.74 }),
+    I: printMaterial(I_COLORS.sail)
   };
   const jibMats = {
     B: plainB(B_COLORS.jib, { side: THREE.DoubleSide, roughness: 0.9 }),
@@ -528,7 +546,8 @@ export function buildBoat() {
     D: plainD(D_COLORS.jib, { side: THREE.DoubleSide, roughness: 0.85, envIntensity: 0.3 }),
     E: printMaterial(E_COLORS.jib),
     F: plainToon(F_COLORS.jib, { side: THREE.DoubleSide }),
-    H: plainClay(H_COLORS.jib, { side: THREE.DoubleSide, roughness: 0.74 })
+    H: plainClay(H_COLORS.jib, { side: THREE.DoubleSide, roughness: 0.74 }),
+    I: printMaterial(I_COLORS.jib)
   };
   const flagMats = {
     B: plainB(B_COLORS.flag, { side: THREE.DoubleSide }),
@@ -538,7 +557,8 @@ export function buildBoat() {
     E: printMaterial(E_COLORS.flag),
     F: plainToon(F_COLORS.flag, { side: THREE.DoubleSide }),
     G: plainToon(A_COLORS.flag, { side: THREE.DoubleSide }),
-    H: plainClay(H_COLORS.flag, { side: THREE.DoubleSide, roughness: 0.72 })
+    H: plainClay(H_COLORS.flag, { side: THREE.DoubleSide, roughness: 0.72 }),
+    I: printMaterial(I_COLORS.flag)
   };
 
   addTriangleMesh(
@@ -655,7 +675,7 @@ export function buildBoat() {
         shell.visible = style === 'C' || style === 'E';
       }
       foamRing.visible = style === 'A' || style === 'F' || style === 'G';
-      shadowBlob.visible = style === 'D';
+      shadowBlob.visible = style === 'D' || style === 'H' || style === 'I';
     },
     // 将天穹生成的 PMREM 环境贴图赋给全部 PBR 标准材质
     setEnvironmentMap(tex) {

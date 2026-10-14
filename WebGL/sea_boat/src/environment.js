@@ -229,7 +229,7 @@ export function createClouds(scene) {
   }
 
   function setStyle(style) {
-    const ukiyoe = style === 'E';
+    const ukiyoe = style === 'E' || style === 'I';
     const clay = style === 'H';
     clayClouds.visible = clay;
     const mat = style === 'B' ? matB : (style === 'D' ? matD : matA);

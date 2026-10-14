@@ -14,6 +14,7 @@ import { createToonWater } from './water_toon.js';
 import { createRealisticWater } from './water_realistic.js';
 import { createUkiyoeWater } from './water_ukiyoe.js';
 import { createClayWater } from './water_clay.js';
+import { createInkWater } from './water_ink.js';
 import { FoamDecals } from './foam_decals.js';
 import { WaveClaws } from './wave_claws.js';
 import { createWatercolorPass } from './watercolor_pass.js';
@@ -92,10 +93,11 @@ const waterUkiyoe = createUkiyoeWater(waveField, STYLE_CONFIG.E.water);
 // 模块版本错配时（浏览器缓存了旧配置文件）降级跳过，避免启动崩溃
 const waterWash = STYLE_CONFIG.F ? createGhibliWater(waveField, STYLE_CONFIG.F.water) : null;
 const waterClay = STYLE_CONFIG.H ? createClayWater(waveField, STYLE_CONFIG.H.water) : null;
+const waterInk = STYLE_CONFIG.I ? createInkWater(waveField, STYLE_CONFIG.I.water) : null;
 scene.add(
   waterGhibli.mesh, waterFlat.mesh, waterToon.mesh,
   waterRealistic.mesh, waterUkiyoe.mesh, ...(waterWash ? [waterWash.mesh] : []),
-  ...(waterClay ? [waterClay.mesh] : [])
+  ...(waterClay ? [waterClay.mesh] : []), ...(waterInk ? [waterInk.mesh] : [])
 );
 
 const boat = buildBoat();
@@ -221,6 +223,9 @@ function setStyle(name) {
   if (waterClay !== null) {
     waterClay.mesh.visible = name === 'H';
   }
+  if (waterInk !== null) {
+    waterInk.mesh.visible = name === 'I';
+  }
   waterFlat.material.wireframe = params.水面线框 && name === 'B';
 
   boat.applyStyle(name);
@@ -240,6 +245,7 @@ function setStyle(name) {
     waterClay.uniforms.uBoatHeading.value = boat.heading;
     waterClay.update();
   }
+  if (waterInk) waterInk.update();
   if (waterWash) waterWash.update();
   if (name === 'E') {
     foamDecals.reset(waveField, camera.position);
@@ -279,6 +285,8 @@ window.addEventListener('keydown', (event) => {
     setStyle('G');
   } else if (event.code === 'Digit8') {
     setStyle('H');
+  } else if (event.code === 'Digit9') {
+    setStyle('I');
   }
 });
 
@@ -297,7 +305,8 @@ styleController = styleFolder.add(params, '画面风格', {
   '方案 E · 浮世绘海浪': 'E',
   '方案 F · 水彩纸本': 'F',
   '方案 G · 像素艺术': 'G',
-  '方案 H · 黏土定格动画': 'H'
+  '方案 H · 黏土定格动画': 'H',
+  '方案 I · 水墨留白': 'I'
 }).onChange(setStyle);
 
 const seaFolder = gui.addFolder('海面');
@@ -372,6 +381,8 @@ renderer.setAnimationLoop(() => {
       waterWash.update();
     } else if (params.画面风格 === 'H' && waterClay !== null) {
       if (waveField.time !== lastClayTime) waterClay.update();
+    } else if (params.画面风格 === 'I' && waterInk !== null) {
+      waterInk.update();
     } else {
       waterFlat.update();
     }
