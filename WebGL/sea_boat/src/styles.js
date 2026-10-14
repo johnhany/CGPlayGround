@@ -121,6 +121,26 @@ export const STYLE_CONFIG = {
     hemiIntensity: 0.9,
     cloudScale: 1.0,
     waveScale: 1.0
+  },
+  H: {
+    label: '黏土定格动画',
+    skyTop: 0xdfcdb7,
+    skyHorizon: 0xe4d5c1,
+    sunGlow: 0.0,
+    fog: 0xe4d5c1,
+    sunIntensity: 3.0,
+    hemiIntensity: 0.65,
+    hemiSky: 0xfff0d8,
+    hemiGround: 0x817569,
+    cloudScale: 1.05,
+    waveScale: 0.68,
+    water: {
+      deep: 0x388f9d,
+      top: 0x74b8c8,
+      sky: 0x9db8c8,
+      horizon: 0xe8ded0,
+      sun: 0xfff2da
+    }
   }
 };
 

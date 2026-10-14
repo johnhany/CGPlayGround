@@ -1,5 +1,9 @@
 import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { getGradientMap } from './styles.js';
+import { createClayMaterial } from './clay_material.js';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { TessellateModifier } from 'three/addons/modifiers/TessellateModifier.js';
 
 // 船体分站数据，沿纵向排布：z 为纵向位置，g 为舷边半宽，gy 为舷边高度，
 // c 为舭部半宽，cy 为舭部高度，k 为龙骨高度。y 等于 0 为设计水线
@@ -88,6 +92,19 @@ const F_COLORS = {
   flag: 0xc2726a,
   roof: 0x9a6a4e,
   glass: 0x5a7a8a
+};
+
+// 方案 H 黏土配色：手工捏塑的暖陶土色系
+const H_COLORS = {
+  bottom: 0x8a4a3a,
+  hull: 0xe0a05c,
+  deck: 0xe3b87a,
+  wood: 0x7a4e30,
+  sail: 0xf0e8d4,
+  jib: 0xe6dcc4,
+  flag: 0xc05848,
+  roof: 0xc9604d,
+  glass: 0x4a6a7a
 };
 
 const WATERLINE = -0.12;         // 船壳分色判据
@@ -192,13 +209,22 @@ export function buildBoat() {
   const hullGeo = new THREE.BufferGeometry();
   hullGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   hullGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  // 平面 UV，供方案 H 的黏土凹凸贴图使用
+  const hullUvs = [];
+  for (let i = 0; i < positions.length; i += 3) {
+    hullUvs.push(positions[i] * 0.22 + positions[i + 2] * 0.11, positions[i + 1] * 0.22 + 0.5);
+  }
+  hullGeo.setAttribute('uv', new THREE.Float32BufferAttribute(hullUvs, 2));
   hullGeo.computeVertexNormals();
 
-  // 六套配色下的船壳顶点色，切换风格时整体替换 color 属性
+  // 七套配色下的船壳顶点色，切换风格时整体替换 color 属性
   const gradientMap = getGradientMap();
-  const paletteOf = { A: A_COLORS, B: B_COLORS, C: C_COLORS, D: D_COLORS, E: E_COLORS, F: F_COLORS };
+  const paletteOf = {
+    A: A_COLORS, B: B_COLORS, C: C_COLORS,
+    D: D_COLORS, E: E_COLORS, F: F_COLORS, H: H_COLORS
+  };
   const hullColorAttrs = {};
-  for (const key of ['A', 'B', 'C', 'D', 'E', 'F']) {
+  for (const key of ['A', 'B', 'C', 'D', 'E', 'F', 'H']) {
     const data = new Float32Array(colors);
     if (key === 'D') {
       recolorHullWet(
@@ -232,6 +258,39 @@ export function buildBoat() {
     metalness: 0.02,
     side: THREE.DoubleSide
   }), 0.85);
+  const hullMatClay = trackEnv(createClayMaterial(0xffffff, {
+    vertexColors: true, scale: 3.8, depth: 0.018, roughness: 0.64
+  }), 0.65);
+  // H 独立的捏塑船壳：圆润厚边、连续船舷，不修改其他风格的分站网格。
+  const clayOutline = new THREE.Shape();
+  clayOutline.moveTo(0, 2.25);
+  clayOutline.bezierCurveTo(0.25, 2.0, 0.74, 0.9, 0.72, -0.4);
+  clayOutline.bezierCurveTo(0.72, -1.2, 0.68, -2.05, 0.45, -2.08);
+  clayOutline.quadraticCurveTo(0, -2.2, -0.45, -2.08);
+  clayOutline.bezierCurveTo(-0.68, -2.05, -0.72, -1.2, -0.72, -0.4);
+  clayOutline.bezierCurveTo(-0.74, 0.9, -0.25, 2.0, 0, 2.25);
+  let clayHullGeo = new THREE.ExtrudeGeometry(clayOutline, {
+    depth: 0.52, steps: 1, bevelEnabled: true, bevelThickness: 0.15,
+    bevelSize: 0.13, bevelSegments: 6, curveSegments: 18
+  });
+  clayHullGeo.rotateX(Math.PI / 2);
+  clayHullGeo.translate(0, 0.36, 0);
+  clayHullGeo.deleteAttribute('normal');
+  clayHullGeo.deleteAttribute('uv');
+  clayHullGeo = mergeVertices(clayHullGeo, 0.0001);
+  clayHullGeo.computeVertexNormals();
+  const clayHullColors = [];
+  const clayBottom = new THREE.Color(H_COLORS.bottom);
+  const clayHullColor = new THREE.Color(H_COLORS.hull);
+  const clayDeck = new THREE.Color(H_COLORS.deck);
+  const clayColor = new THREE.Color();
+  for (let i = 0; i < clayHullGeo.attributes.position.count; i++) {
+    const y = clayHullGeo.attributes.position.getY(i);
+    clayColor.copy(clayBottom).lerp(clayHullColor, smoothstep(-0.15, 0.02, y));
+    clayColor.lerp(clayDeck, smoothstep(0.38, 0.49, y));
+    clayHullColors.push(clayColor.r, clayColor.g, clayColor.b);
+  }
+  clayHullGeo.setAttribute('color', new THREE.Float32BufferAttribute(clayHullColors, 3));
   const hullMatToon = new THREE.MeshToonMaterial({
     vertexColors: true,
     gradientMap,
@@ -258,14 +317,19 @@ export function buildBoat() {
 
   const hull = new THREE.Mesh(hullGeo, hullMatB);
   hull.castShadow = true;
+  hull.receiveShadow = false;
   group.add(hull);
   styleEntries.push({
     mesh: hull,
     solid: true,
     apply(style) {
-      hull.geometry.setAttribute('color', hullColorAttrs[style] || hullColorAttrs.A);
+      hull.geometry = style === 'H' ? clayHullGeo : hullGeo;
+      hull.receiveShadow = style === 'H';
+      if (style !== 'H') hull.geometry.setAttribute('color', hullColorAttrs[style] || hullColorAttrs.A);
       hull.material = style === 'B' ? hullMatB
-        : (style === 'D' ? hullMatD : (style === 'E' ? hullMatPrint : hullMatToon));
+        : (style === 'D' ? hullMatD
+          : (style === 'E' ? hullMatPrint
+            : (style === 'H' ? hullMatClay : hullMatToon)));
     }
   });
 
@@ -292,23 +356,57 @@ export function buildBoat() {
       ...rest
     }), envIntensity ?? 0.75);
   };
+  const plainClay = (hex, extra = {}) => {
+    const { envIntensity, bump, ...rest } = extra;
+    return trackEnv(createClayMaterial(hex, {
+      scale: 3.8, depth: 0.018, roughness: 0.68, ...rest
+    }), envIntensity ?? 0.65);
+  };
 
   // mats 形如 { B, A, C }，C 未单独给出时与 A 共用卡通材质
   function addStyledMesh(mesh, mats, solid = true) {
     mesh.castShadow = true;
+    mesh.receiveShadow = false;
+    const originalGeo = mesh.geometry;
+    const clayGeo = mesh.userData.clayGeometry || originalGeo;
     group.add(mesh);
     styleEntries.push({
       mesh,
       solid,
-      apply(style) { mesh.material = mats[style] || mats.A; }
+      apply(style) {
+        mesh.material = mats[style] || mats.A;
+        mesh.receiveShadow = style === 'H';
+        mesh.geometry = style === 'H' ? clayGeo : originalGeo;
+      }
     });
     return mesh;
   }
 
-  function addBox(w, h, d, x, y, z, mats) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mats.B);
+  function addBox(w, h, d, x, y, z, mats, options = {}) {
+    const boxGeo = new THREE.BoxGeometry(w, h, d);
+    let roundedGeo = null;
+    if (options.roundedRadius) {
+      roundedGeo = new RoundedBoxGeometry(w, h, d, 5, options.roundedRadius);
+    }
+    const roundedStyles = options.roundedStyles || [];
+    const mesh = new THREE.Mesh(boxGeo, mats.B);
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
     mesh.position.set(x, y, z);
-    return addStyledMesh(mesh, mats);
+    group.add(mesh);
+    styleEntries.push({
+      mesh,
+      solid: true,
+      apply(style) {
+        mesh.material = mats[style] || mats.A;
+        mesh.castShadow = style === 'H';
+        mesh.receiveShadow = style === 'H';
+        if (roundedGeo !== null) {
+          mesh.geometry = roundedStyles.includes(style) ? roundedGeo : boxGeo;
+        }
+      }
+    });
+    return mesh;
   }
 
   const cabinMats = {
@@ -317,7 +415,8 @@ export function buildBoat() {
     C: plainToon(C_COLORS.hull),
     D: plainD(D_COLORS.hull, { map: woodTexture }),
     E: printMaterial(E_COLORS.hull),
-    F: plainToon(F_COLORS.hull)
+    F: plainToon(F_COLORS.hull),
+    H: plainClay(H_COLORS.hull)
   };
   const roofMats = {
     B: plainB(B_COLORS.roof),
@@ -325,7 +424,8 @@ export function buildBoat() {
     C: plainToon(C_COLORS.roof),
     D: plainD(D_COLORS.roof, { roughness: 0.5 }),
     E: printMaterial(E_COLORS.roof),
-    F: plainToon(F_COLORS.roof)
+    F: plainToon(F_COLORS.roof),
+    H: plainClay(H_COLORS.roof)
   };
   const glassMats = {
     B: plainB(B_COLORS.glass),
@@ -333,7 +433,8 @@ export function buildBoat() {
     C: plainToon(C_COLORS.glass),
     D: plainD(D_COLORS.glass, { roughness: 0.12, metalness: 0.1, envIntensity: 1.3 }),
     E: printMaterial(E_COLORS.glass),
-    F: plainToon(F_COLORS.glass)
+    F: plainToon(F_COLORS.glass),
+    H: plainClay(H_COLORS.glass, { roughness: 0.75, depth: 0.008 })
   };
   const woodMats = {
     B: plainB(B_COLORS.wood),
@@ -341,25 +442,64 @@ export function buildBoat() {
     C: plainToon(C_COLORS.wood),
     D: plainD(D_COLORS.wood, { map: woodTexture, roughness: 0.45 }),
     E: printMaterial(E_COLORS.wood),
-    F: plainToon(F_COLORS.wood)
+    F: plainToon(F_COLORS.wood),
+    H: plainClay(H_COLORS.wood, { roughness: 0.85 })
   };
 
-  addBox(0.95, 0.5, 1.1, 0, 0.71, -0.55, cabinMats);              // 船舱
-  addBox(1.08, 0.08, 1.24, 0, 1.0, -0.55, roofMats);              // 舱顶
+  addBox(0.95, 0.5, 1.1, 0, 0.71, -0.55, cabinMats,
+    { roundedRadius: 0.1, roundedStyles: ['H'] });                // 船舱
+  addBox(1.08, 0.08, 1.24, 0, 1.0, -0.55, roofMats,
+    { roundedRadius: 0.04, roundedStyles: ['H'] });               // 舱顶
   addBox(0.02, 0.18, 0.5, 0.485, 0.75, -0.55, glassMats);         // 左舷窗
   addBox(0.02, 0.18, 0.5, -0.485, 0.75, -0.55, glassMats);        // 右舷窗
   addBox(0.5, 0.18, 0.02, 0, 0.75, 0.005, glassMats);             // 前窗
 
   const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.06, 3.8, 6), woodMats.B);
   mast.position.set(0, 2.36, 0.5);
+  mast.userData.clayGeometry = new THREE.CapsuleGeometry(0.065, 3.67, 5, 16);
   addStyledMesh(mast, woodMats);
 
   const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.6, 6), woodMats.B);
   boom.rotation.x = Math.PI / 2;
   boom.position.set(0, 1.2, -0.28);
+  boom.userData.clayGeometry = new THREE.CapsuleGeometry(0.045, 1.51, 4, 12);
   addStyledMesh(boom, woodMats);
 
   // ---- 帆与旗 ----
+
+  function clayTriangle(a, b, c, thickness = 0.055) {
+    const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b), C = new THREE.Vector3(...c);
+    const U = B.clone().sub(A).normalize();
+    const N = new THREE.Vector3().crossVectors(U, C.clone().sub(A)).normalize();
+    const V = new THREE.Vector3().crossVectors(N, U);
+    const rel = C.clone().sub(A);
+    const shape = new THREE.Shape();
+    shape.moveTo(0, 0);
+    shape.lineTo(B.distanceTo(A), 0);
+    shape.lineTo(rel.dot(U), rel.dot(V));
+    shape.closePath();
+    let geo = new THREE.ExtrudeGeometry(shape, {
+      depth: thickness, bevelEnabled: true, bevelThickness: thickness * 0.5,
+      bevelSize: thickness * 0.7, bevelSegments: 4, curveSegments: 8
+    });
+    geo = new TessellateModifier(0.24, 5).modify(geo);
+    const positions = geo.attributes.position;
+    const cx = rel.dot(U), cy = rel.dot(V), bx = B.distanceTo(A);
+    for (let i = 0; i < positions.count; i++) {
+      const t = positions.getY(i) / cy;
+      const s = (positions.getX(i) - t * cx) / bx;
+      const puff = Math.max(0, 27 * s * t * (1 - s - t));
+      positions.setZ(i, positions.getZ(i) + Math.min(0.20, bx * 0.1) * puff);
+    }
+    geo.deleteAttribute('normal');
+    geo.deleteAttribute('uv');
+    geo = mergeVertices(geo, 0.0001);
+    geo.computeVertexNormals();
+    geo.translate(0, 0, -thickness * 0.5);
+    geo.applyMatrix4(new THREE.Matrix4().makeBasis(U, V, N));
+    geo.translate(...a);
+    return geo;
+  }
 
   function addTriangleMesh(a, b, c, mats) {
     const geo = new THREE.BufferGeometry();
@@ -368,6 +508,7 @@ export function buildBoat() {
     ));
     geo.computeVertexNormals();
     const mesh = new THREE.Mesh(geo, mats.B);
+    mesh.userData.clayGeometry = clayTriangle(a, b, c);
     return addStyledMesh(mesh, mats);
   }
 
@@ -377,7 +518,8 @@ export function buildBoat() {
     C: plainToon(C_COLORS.sail, { side: THREE.DoubleSide }),
     D: plainD(D_COLORS.sail, { side: THREE.DoubleSide, roughness: 0.85, envIntensity: 0.3 }),
     E: printMaterial(E_COLORS.sail),
-    F: plainToon(F_COLORS.sail, { side: THREE.DoubleSide })
+    F: plainToon(F_COLORS.sail, { side: THREE.DoubleSide }),
+    H: plainClay(H_COLORS.sail, { side: THREE.DoubleSide, roughness: 0.74 })
   };
   const jibMats = {
     B: plainB(B_COLORS.jib, { side: THREE.DoubleSide, roughness: 0.9 }),
@@ -385,7 +527,8 @@ export function buildBoat() {
     C: plainToon(C_COLORS.jib, { side: THREE.DoubleSide }),
     D: plainD(D_COLORS.jib, { side: THREE.DoubleSide, roughness: 0.85, envIntensity: 0.3 }),
     E: printMaterial(E_COLORS.jib),
-    F: plainToon(F_COLORS.jib, { side: THREE.DoubleSide })
+    F: plainToon(F_COLORS.jib, { side: THREE.DoubleSide }),
+    H: plainClay(H_COLORS.jib, { side: THREE.DoubleSide, roughness: 0.74 })
   };
   const flagMats = {
     B: plainB(B_COLORS.flag, { side: THREE.DoubleSide }),
@@ -394,7 +537,8 @@ export function buildBoat() {
     D: plainD(D_COLORS.flag, { side: THREE.DoubleSide, roughness: 0.7 }),
     E: printMaterial(E_COLORS.flag),
     F: plainToon(F_COLORS.flag, { side: THREE.DoubleSide }),
-    G: plainToon(A_COLORS.flag, { side: THREE.DoubleSide })
+    G: plainToon(A_COLORS.flag, { side: THREE.DoubleSide }),
+    H: plainClay(H_COLORS.flag, { side: THREE.DoubleSide, roughness: 0.72 })
   };
 
   addTriangleMesh(
@@ -417,12 +561,17 @@ export function buildBoat() {
   ));
   flagGeo.computeVertexNormals();
   const flag = new THREE.Mesh(flagGeo, flagMats.B);
+  const flagClayGeo = clayTriangle([0, 0.1, 0], [0, -0.02, 0], [0, 0.04, -0.38], 0.025);
   flag.position.set(0, 4.12, 0.5);
   group.add(flag);
   styleEntries.push({
     mesh: flag,
     solid: false,
-    apply(style) { flag.material = flagMats[style] || flagMats.A; }
+    apply(style) {
+      flag.material = flagMats[style] || flagMats.A;
+      flag.geometry = style === 'H' ? flagClayGeo : flagGeo;
+      flag.castShadow = style === 'H';
+    }
   });
 
   // ---- 方案 C 倒置外壳描边 ----

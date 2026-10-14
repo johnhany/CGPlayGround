@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { STYLE_CONFIG, getGradientMap } from './styles.js';
+import { createClayMaterial } from './clay_material.js';
 
 // 大气散射风格的渐变天穹。着色器末尾接入 three.js 的色调映射与输出编码，
 // 使天空与水面经过同一套 ACES 管线，地平线处与雾色无缝衔接
@@ -130,6 +131,31 @@ export function createClouds(scene) {
     emissiveIntensity: 0.28
   });
 
+  // H 的近景粘土云独立于远景多边形积云：几个捏圆的小团块拼接。
+  const clayClouds = new THREE.Group();
+  const cloudClay = createClayMaterial(0xeee6d5, { scale: 3, depth: 0.010, roughness: 0.8 });
+  for (const [cx, cy, cz, size] of [[-5.2, 3.7, -5.7, 0.9], [4.2, 4.5, -7.0, 0.8]]) {
+    const cluster = new THREE.Group();
+    for (const [x, y, r] of [[-1.0, 0, 0.64], [-0.4, 0.25, 0.84], [0.35, 0.38, 0.92], [1.0, 0, 0.60]]) {
+      const geo = new THREE.SphereGeometry(r * size, 24, 16);
+      const p = geo.attributes.position;
+      for (let i = 0; i < p.count; i++) {
+        const dx = p.getX(i), dy = p.getY(i), dz = p.getZ(i);
+        const wobble = 1 + 0.035 * Math.sin(dx * 6 + dy * 3) * Math.cos(dz * 5);
+        p.setXYZ(i, dx * wobble, dy * wobble, dz * wobble);
+      }
+      geo.computeVertexNormals();
+      const blob = new THREE.Mesh(geo, cloudClay);
+      blob.scale.set(1, 0.78, 0.7);
+      blob.position.set(x * size, y * size, 0);
+      cluster.add(blob);
+    }
+    cluster.position.set(cx, cy, cz);
+    clayClouds.add(cluster);
+  }
+  clayClouds.visible = false;
+  group.add(clayClouds);
+
   const clusters = [];
   const blobs = [];
   for (let i = 0; i < 7; i++) {
@@ -204,15 +230,17 @@ export function createClouds(scene) {
 
   function setStyle(style) {
     const ukiyoe = style === 'E';
+    const clay = style === 'H';
+    clayClouds.visible = clay;
     const mat = style === 'B' ? matB : (style === 'D' ? matD : matA);
     for (const blob of blobs) {
       blob.material = mat;
-      blob.visible = !ukiyoe;
+      blob.visible = !ukiyoe && !clay;
     }
     const s = STYLE_CONFIG[style].cloudScale;
     for (const c of clusters) {
       c.g.scale.setScalar(s);
-      c.g.visible = !ukiyoe;
+      c.g.visible = !ukiyoe && !clay;
     }
     spriteGroup.visible = ukiyoe;
   }
@@ -254,6 +282,16 @@ export function applyEnvironmentStyle(name, targets) {
   targets.skyUniforms.uSunGlow.value = config.sunGlow;
   targets.scene.fog.color.setHex(config.fog);
   targets.scene.background.setHex(config.fog);
+  targets.lights.hemi.color.setHex(config.hemiSky ?? 0xbfe4ff);
+  targets.lights.hemi.groundColor.setHex(config.hemiGround ?? 0x2a6a8f);
+  const studio = name === 'H';
+  targets.lights.sun.shadow.normalBias = studio ? 0.025 : 0.15;
+  targets.lights.sun.shadow.radius = studio ? 10 : 1;
+  const shadowCam = targets.lights.sun.shadow.camera;
+  const extent = studio ? 16 : 26;
+  shadowCam.left = shadowCam.bottom = -extent;
+  shadowCam.right = shadowCam.top = extent;
+  shadowCam.updateProjectionMatrix();
   targets.lights.sun.intensity = config.sunIntensity;
   targets.lights.hemi.intensity = config.hemiIntensity;
   targets.clouds.setStyle(name);
